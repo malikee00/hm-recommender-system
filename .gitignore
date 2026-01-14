@@ -1,0 +1,75 @@
+# ==========================================
+# Python & Environment
+# ==========================================
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Environment variables
+.env
+.env.*
+
+# ==========================================
+# OS / Editor junk
+# ==========================================
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# ==========================================
+# Data (RAW & PROCESSED)
+# ==========================================
+# Raw datasets (never commit)
+data/raw/
+data/processed/
+
+# Feature store outputs (large, generated)
+data/feature_store/*.parquet
+
+# Allow README inside data (if any)
+!data/**/README.md
+
+# ==========================================
+# ML Artifacts (Generated)
+# ==========================================
+# Trained models & embeddings
+ml/registry/**
+
+# Allow metadata & example files if needed (optional)
+# !ml/registry/**/metadata.json
+
+# ==========================================
+# Training / Evaluation Outputs
+# ==========================================
+ml/reports/**/*.json
+ml/reports/**/*.csv
+
+# Allow markdown analysis & storytelling
+!ml/reports/**/*.md
+
+# ==========================================
+# Logs & temp
+# ==========================================
+logs/
+*.log
+*.tmp
+
+# ==========================================
+# Notebooks (optional)
+# ==========================================
+*.ipynb_checkpoints/
+.ipynb_checkpoints/
+
+# ==========================================
+# Build / Cache
+# ==========================================
+.cache/
+dist/
+build/
