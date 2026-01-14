@@ -176,7 +176,7 @@ def main() -> None:
         logger.info(f"user_history_agg rows : {user_history_agg.count():,}")
         logger.info(f"item_popularity rows  : {item_pop.count():,}")
 
-        logger.info("✅ [DONE] Feature store tables written.")
+        logger.info("[DONE] Feature store tables written.")
 
     finally:
         spark.stop()
