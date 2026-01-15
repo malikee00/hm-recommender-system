@@ -95,8 +95,8 @@ def main() -> None:
     ap.add_argument("--reports_dir", default="ml/reports/recommender")
     ap.add_argument("--topk_max", type=int, default=50)
     ap.add_argument("--ks", default="5,10,20")
-    ap.add_argument("--eval_max_users", type=int, default=0, help="0=all, >0 batasi user eval (debug)")
-    ap.add_argument("--seen_cap_per_user", type=int, default=200, help="batasi seen items per user (hemat RAM)")
+    ap.add_argument("--eval_max_users", type=int, default=0)
+    ap.add_argument("--seen_cap_per_user", type=int, default=200)
     args = ap.parse_args()
 
     ks = tuple(int(x.strip()) for x in args.ks.split(","))
@@ -141,6 +141,8 @@ def main() -> None:
         item_cat_sizes=ckpt["item_cat_sizes"],
         age_num_buckets=ckpt["age_num_buckets"],
         embedding_dim=ckpt["embedding_dim"],
+        user_cat_cols=ckpt["user_cat_cols"],
+        item_cat_cols=ckpt["item_cat_cols"],
     )
     model.load_state_dict(ckpt["state_dict"])
     model = model.to(device)
@@ -159,7 +161,7 @@ def main() -> None:
     for u, i in zip(train_sub["customer_id"].to_numpy(), train_sub["article_id"].to_numpy()):
         if len(seen[u]) < args.seen_cap_per_user:
             seen[u].append(i)
-    seen_sets = {u: set(v) for u, v in seen.items()}  
+    seen_sets = {u: set(v) for u, v in seen.items()}
 
     reco_map: Dict[str, List[str]] = {}
     user_to_index = enc.user_id_map
@@ -201,6 +203,7 @@ def main() -> None:
 
     pop = item_popularity.copy()
     pop["article_id"] = pop["article_id"].astype(str)
+
     if "purchase_count" in pop.columns and "popularity_rank" in pop.columns:
         pop = pop.sort_values(["purchase_count", "popularity_rank"], ascending=[False, True])
     elif "purchase_count" in pop.columns:
@@ -215,9 +218,10 @@ def main() -> None:
     with open(os.path.join(args.reports_dir, "baseline_metrics.json"), "w", encoding="utf-8") as f:
         json.dump(baseline_metrics, f, indent=2)
 
-    print("[DONE] Evaluation done. Reports saved to:", args.reports_dir)
-    print("Model:", model_metrics)
-    print("Baseline:", baseline_metrics)
+    print("reports dir:", args.reports_dir)
+    print("split:", split_stats)
+    print("model:", model_metrics)
+    print("baseline:", baseline_metrics)
 
 
 if __name__ == "__main__":

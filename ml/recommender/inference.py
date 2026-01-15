@@ -1,16 +1,15 @@
 from __future__ import annotations
 
-import json
 import os
 from dataclasses import dataclass
-from typing import List, Dict, Any, Tuple
+from typing import List
 
 import numpy as np
 import pandas as pd
 import torch
 
 try:
-    import faiss 
+    import faiss
 except Exception:
     faiss = None
 
@@ -54,24 +53,24 @@ class RecommenderService:
         self.index = faiss.read_index(os.path.join(self.registry_dir, "faiss.index"))
 
         pop_path = os.path.join(self.registry_dir, "item_popularity.csv")
-        self.popularity = pd.read_csv(pop_path)
-        self.popularity["article_id"] = self.popularity["article_id"].astype(str)
-        self.pop_list = self.popularity["article_id"].tolist()
+        pop = pd.read_csv(pop_path)
+        pop["article_id"] = pop["article_id"].astype(str)
+        self.pop_list = pop["article_id"].tolist()
 
         user_df = pd.read_parquet(os.path.join(self.feature_store_dir, "user_features.parquet"))
         user_feat_mat, _ = transform_user_features(user_df, self.enc)
-        self.user_feat_t = torch.tensor(user_feat_mat, dtype=torch.long)
+        self.user_feat_t = torch.as_tensor(user_feat_mat, dtype=torch.long, device="cpu")
 
         ckpt = torch.load(os.path.join(self.registry_dir, "two_tower_model.pt"), map_location="cpu")
         from .train import TwoTower
 
         self.model = TwoTower(
-            num_users=len(self.enc.user_id_map),
-            num_items=len(self.enc.item_id_map),
             user_cat_sizes=ckpt["user_cat_sizes"],
             item_cat_sizes=ckpt["item_cat_sizes"],
             age_num_buckets=ckpt["age_num_buckets"],
             embedding_dim=ckpt["embedding_dim"],
+            user_cat_cols=ckpt["user_cat_cols"],
+            item_cat_cols=ckpt["item_cat_cols"],
         )
         self.model.load_state_dict(ckpt["state_dict"])
         self.model = self.model.to(self.device)
@@ -84,11 +83,11 @@ class RecommenderService:
         customer_id = str(customer_id)
 
         if customer_id not in self.enc.user_id_map:
-            recs = [Recommendation(article_id=a, score=float(0.0)) for a in self.pop_list[:top_k]]
+            recs = [Recommendation(article_id=a, score=0.0) for a in self.pop_list[:top_k]]
             return RecommendResult(customer_id=customer_id, top_k=top_k, is_fallback=True, recommendations=recs)
 
         u_idx = self.enc.user_id_map[customer_id]
-        feat = self.user_feat_t[u_idx:u_idx+1].to(self.device)
+        feat = self.user_feat_t[u_idx : u_idx + 1].to(self.device)
 
         with torch.no_grad():
             u_emb = self.model.user_forward(feat).detach().cpu().numpy().astype(np.float32)
@@ -108,7 +107,7 @@ class RecommenderService:
                 break
 
         if not recs:
-            recs = [Recommendation(article_id=a, score=float(0.0)) for a in self.pop_list[:top_k]]
+            recs = [Recommendation(article_id=a, score=0.0) for a in self.pop_list[:top_k]]
             return RecommendResult(customer_id=customer_id, top_k=top_k, is_fallback=True, recommendations=recs)
 
         return RecommendResult(customer_id=customer_id, top_k=top_k, is_fallback=False, recommendations=recs)
