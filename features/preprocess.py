@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Dict, List, Tuple, Any
+from typing import Dict, List, Tuple, Any, Optional
 
 import numpy as np
 import pandas as pd
 
 
-USER_CAT_COLS = ["club_member_status", "fashion_news_frequency", "active"]
+USER_CAT_COLS = ["club_member_status", "fashion_news_frequency", "active", "top_product_group_name"]
 ITEM_CAT_COLS = ["product_group_name", "department_name", "colour_group_name"]
 
 
@@ -20,14 +20,12 @@ def _clean_str(x: Any) -> str:
 
 
 def bucketize_age(age: Any) -> int:
-    """Return age bucket index."""
     if age is None or (isinstance(age, float) and np.isnan(age)):
-        return 0  # unknown
+        return 0
     try:
         a = int(age)
     except Exception:
         return 0
-    # buckets: 0 unknown, 1: <=18, 2:19-24, 3:25-34, 4:35-44, 5:45-54, 6:55-64, 7:65+
     if a <= 18:
         return 1
     if a <= 24:
@@ -44,7 +42,6 @@ def bucketize_age(age: Any) -> int:
 
 
 def build_id_mapping(values: List[str]) -> Dict[str, int]:
-    """0 reserved for PAD/UNK not used; but we keep it simple: start from 0."""
     uniq = pd.Series(values).dropna().astype(str).unique().tolist()
     return {v: i for i, v in enumerate(uniq)}
 
@@ -67,7 +64,7 @@ class Encoders:
     item_id_map: Dict[str, int]
     user_cat_maps: Dict[str, Dict[str, int]]
     item_cat_maps: Dict[str, Dict[str, int]]
-    age_num_buckets: int = 8  # 0..7
+    age_num_buckets: int = 8
 
     def to_json(self) -> Dict[str, Any]:
         return {
@@ -93,24 +90,62 @@ class Encoders:
         )
 
 
-def fit_encoders(user_df: pd.DataFrame, item_df: pd.DataFrame, interactions_df: pd.DataFrame) -> Encoders:
+def _load_user_history_agg(feature_store_dir: Optional[str]) -> Optional[pd.DataFrame]:
+    if not feature_store_dir:
+        return None
+    p = os.path.join(feature_store_dir, "user_history_agg.parquet")
+    if not os.path.exists(p):
+        return None
+    df = pd.read_parquet(p)
+    if "customer_id" not in df.columns:
+        return None
+    df = df.copy()
+    df["customer_id"] = df["customer_id"].astype(str)
+    if "top_product_group_name" not in df.columns:
+        df["top_product_group_name"] = "__MISSING__"
+    return df[["customer_id", "top_product_group_name"]]
+
+
+def fit_encoders(
+    user_df: pd.DataFrame,
+    item_df: pd.DataFrame,
+    interactions_df: pd.DataFrame,
+    user_history_agg_df: Optional[pd.DataFrame] = None,
+) -> Encoders:
     user_ids = interactions_df["customer_id"].astype(str).tolist()
     item_ids = interactions_df["article_id"].astype(str).tolist()
 
     user_id_map = build_id_mapping(user_ids)
     item_id_map = build_id_mapping(item_ids)
 
-    user_cat_maps = {}
-    for c in USER_CAT_COLS:
-        if c not in user_df.columns:
-            user_df[c] = "__MISSING__"
-        user_cat_maps[c] = build_cat_mapping(user_df[c])
+    u = user_df.copy()
+    u["customer_id"] = u["customer_id"].astype(str)
 
-    item_cat_maps = {}
+    if user_history_agg_df is not None:
+        h = user_history_agg_df.copy()
+        h["customer_id"] = h["customer_id"].astype(str)
+        if "top_product_group_name" not in h.columns:
+            h["top_product_group_name"] = "__MISSING__"
+        u = u.merge(h[["customer_id", "top_product_group_name"]], on="customer_id", how="left")
+    else:
+        if "top_product_group_name" not in u.columns:
+            u["top_product_group_name"] = "__MISSING__"
+
+    user_cat_maps: Dict[str, Dict[str, int]] = {}
+    for c in USER_CAT_COLS:
+        if c not in u.columns:
+            u[c] = "__MISSING__"
+        user_cat_maps[c] = build_cat_mapping(u[c])
+
+    it = item_df.copy()
+    if "article_id" in it.columns:
+        it["article_id"] = it["article_id"].astype(str)
+
+    item_cat_maps: Dict[str, Dict[str, int]] = {}
     for c in ITEM_CAT_COLS:
-        if c not in item_df.columns:
-            item_df[c] = "__MISSING__"
-        item_cat_maps[c] = build_cat_mapping(item_df[c])
+        if c not in it.columns:
+            it[c] = "__MISSING__"
+        item_cat_maps[c] = build_cat_mapping(it[c])
 
     return Encoders(
         user_id_map=user_id_map,
@@ -120,13 +155,27 @@ def fit_encoders(user_df: pd.DataFrame, item_df: pd.DataFrame, interactions_df: 
     )
 
 
-def transform_user_features(user_df: pd.DataFrame, enc: Encoders) -> Tuple[np.ndarray, List[str]]:
+def transform_user_features(
+    user_df: pd.DataFrame,
+    enc: Encoders,
+    user_history_agg_df: Optional[pd.DataFrame] = None,
+) -> Tuple[np.ndarray, List[str]]:
     inv_user = [None] * len(enc.user_id_map)
     for uid, idx in enc.user_id_map.items():
         inv_user[idx] = uid
 
     u = user_df.copy()
     u["customer_id"] = u["customer_id"].astype(str)
+
+    if user_history_agg_df is not None:
+        h = user_history_agg_df.copy()
+        h["customer_id"] = h["customer_id"].astype(str)
+        if "top_product_group_name" not in h.columns:
+            h["top_product_group_name"] = "__MISSING__"
+        u = u.merge(h[["customer_id", "top_product_group_name"]], on="customer_id", how="left")
+    else:
+        if "top_product_group_name" not in u.columns:
+            u["top_product_group_name"] = "__MISSING__"
 
     u = u.drop_duplicates("customer_id").set_index("customer_id", drop=False)
 
@@ -170,9 +219,6 @@ def transform_item_features(item_df: pd.DataFrame, enc: Encoders) -> Tuple[np.nd
             for j, c in enumerate(ITEM_CAT_COLS):
                 m = enc.item_cat_maps[c]
                 mat[idx, j] = m.get(_clean_str(row.get(c, None)), 0)
-        else:
-            # default all zeros
-            pass
 
     return mat, inv_item
 

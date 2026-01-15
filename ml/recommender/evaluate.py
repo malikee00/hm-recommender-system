@@ -4,7 +4,7 @@ import argparse
 import json
 import os
 from collections import defaultdict
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 
 import numpy as np
 import pandas as pd
@@ -24,6 +24,19 @@ def load_training_tables(feature_store_dir: str) -> Tuple[pd.DataFrame, pd.DataF
     item_features = pd.read_parquet(os.path.join(feature_store_dir, "item_features.parquet"))
     item_popularity = pd.read_parquet(os.path.join(feature_store_dir, "item_popularity.parquet"))
     return interactions, user_features, item_features, item_popularity
+
+
+def load_user_history_agg(feature_store_dir: str) -> Optional[pd.DataFrame]:
+    p = os.path.join(feature_store_dir, "user_history_agg.parquet")
+    if not os.path.exists(p):
+        return None
+    df = pd.read_parquet(p)
+    if "customer_id" not in df.columns or "top_product_group_name" not in df.columns:
+        return None
+    out = df[["customer_id", "top_product_group_name"]].copy()
+    out["customer_id"] = out["customer_id"].astype(str)
+    out["top_product_group_name"] = out["top_product_group_name"].astype(str)
+    return out
 
 
 def leave_last_out_split(interactions: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
@@ -85,6 +98,8 @@ def compute_metrics(reco_map: Dict[str, List[str]], gt_map: Dict[str, str], ks=(
 def load_faiss_index(path: str):
     if faiss is None:
         raise RuntimeError("faiss tidak terinstall. Install faiss-cpu terlebih dahulu.")
+    if not os.path.exists(path):
+        raise FileNotFoundError(path)
     return faiss.read_index(path)
 
 
@@ -97,12 +112,14 @@ def main() -> None:
     ap.add_argument("--ks", default="5,10,20")
     ap.add_argument("--eval_max_users", type=int, default=0)
     ap.add_argument("--seen_cap_per_user", type=int, default=200)
+    ap.add_argument("--filter_unseen_users", action="store_true", default=True)
     args = ap.parse_args()
 
     ks = tuple(int(x.strip()) for x in args.ks.split(","))
     os.makedirs(args.reports_dir, exist_ok=True)
 
     interactions, user_df, item_df, item_popularity = load_training_tables(args.feature_store_dir)
+    user_hist = load_user_history_agg(args.feature_store_dir)
 
     interactions = interactions.dropna(subset=["customer_id", "article_id", "t_dat"]).copy()
     interactions["customer_id"] = interactions["customer_id"].astype(str)
@@ -110,17 +127,32 @@ def main() -> None:
 
     train_df, test_df = leave_last_out_split(interactions)
 
+    enc = load_encoders(os.path.join(args.registry_dir, "feature_encoders.json"))
+
+    gt_map_all: Dict[str, str] = dict(zip(test_df["customer_id"].tolist(), test_df["article_id"].tolist()))
+    eval_users_all = list(gt_map_all.keys())
+
+    if args.eval_max_users and args.eval_max_users > 0:
+        eval_users_all = eval_users_all[: args.eval_max_users]
+        gt_map_all = {u: gt_map_all[u] for u in eval_users_all}
+
+    eval_users = eval_users_all
+    if args.filter_unseen_users:
+        eval_users = [u for u in eval_users_all if u in enc.user_id_map]
+    gt_map: Dict[str, str] = {u: gt_map_all[u] for u in eval_users}
+
     split_stats = {
         "train_rows": int(len(train_df)),
         "test_rows": int(len(test_df)),
         "num_users_total": int(interactions["customer_id"].nunique()),
-        "num_users_eval": int(test_df["customer_id"].nunique()),
+        "num_users_eval_raw": int(len(eval_users_all)),
+        "num_users_eval_filtered": int(len(eval_users)),
+        "filtered_out_users": int(len(eval_users_all) - len(eval_users)),
         "avg_history_len_train": float(train_df.groupby("customer_id").size().mean()) if len(train_df) else 0.0,
+        "uses_user_history_agg": bool(user_hist is not None),
     }
     with open(os.path.join(args.reports_dir, "split_stats.json"), "w", encoding="utf-8") as f:
         json.dump(split_stats, f, indent=2)
-
-    enc = load_encoders(os.path.join(args.registry_dir, "feature_encoders.json"))
 
     inv_item = [None] * len(enc.item_id_map)
     for iid, idx in enc.item_id_map.items():
@@ -128,7 +160,7 @@ def main() -> None:
 
     index = load_faiss_index(os.path.join(args.registry_dir, "faiss.index"))
 
-    user_feat_mat, _ = transform_user_features(user_df, enc)
+    user_feat_mat, _ = transform_user_features(user_df, enc, user_history_agg_df=user_hist)
     user_feat_t = torch.as_tensor(user_feat_mat, dtype=torch.long, device="cpu")
 
     ckpt = torch.load(os.path.join(args.registry_dir, "two_tower_model.pt"), map_location="cpu")
@@ -148,12 +180,6 @@ def main() -> None:
     model = model.to(device)
     model.eval()
 
-    gt_map: Dict[str, str] = dict(zip(test_df["customer_id"].tolist(), test_df["article_id"].tolist()))
-    eval_users = list(gt_map.keys())
-    if args.eval_max_users and args.eval_max_users > 0:
-        eval_users = eval_users[: args.eval_max_users]
-        gt_map = {u: gt_map[u] for u in eval_users}
-
     eval_user_set = set(eval_users)
     train_sub = train_df[train_df["customer_id"].isin(eval_user_set)][["customer_id", "article_id"]]
 
@@ -169,21 +195,16 @@ def main() -> None:
 
     for start in range(0, len(eval_users), bs):
         batch_users = eval_users[start : start + bs]
-        idxs = [user_to_index.get(u, None) for u in batch_users]
-        pairs = [(u, idx) for u, idx in zip(batch_users, idxs) if idx is not None]
-        if not pairs:
-            continue
-
-        u_list, u_idx_list = zip(*pairs)
-        idx_t = torch.tensor(u_idx_list, dtype=torch.long, device="cpu")
+        idxs = [user_to_index[u] for u in batch_users]
+        idx_t = torch.tensor(idxs, dtype=torch.long, device="cpu")
 
         feats = user_feat_t.index_select(0, idx_t).to(device, non_blocking=True)
         with torch.no_grad():
             u_emb = model.user_forward(feats).detach().cpu().numpy().astype(np.float32)
 
-        D, I = index.search(u_emb, args.topk_max)
+        _, I = index.search(u_emb, args.topk_max)
 
-        for u, item_internal_idxs in zip(u_list, I):
+        for u, item_internal_idxs in zip(batch_users, I):
             s = seen_sets.get(u, set())
             recs: List[str] = []
             for item_internal_idx in item_internal_idxs.tolist():

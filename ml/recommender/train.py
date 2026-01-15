@@ -4,7 +4,7 @@ import argparse
 import json
 import os
 from datetime import datetime
-from typing import Dict, Tuple, List
+from typing import Dict, Tuple, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -33,7 +33,7 @@ def load_training_tables(feature_store_dir: str) -> Tuple[pd.DataFrame, pd.DataF
         "item_features": os.path.join(feature_store_dir, "item_features.parquet"),
         "item_popularity": os.path.join(feature_store_dir, "item_popularity.parquet"),
     }
-    for k, p in paths.items():
+    for _, p in paths.items():
         if not os.path.exists(p):
             raise FileNotFoundError(p)
 
@@ -42,6 +42,21 @@ def load_training_tables(feature_store_dir: str) -> Tuple[pd.DataFrame, pd.DataF
     item_features = pd.read_parquet(paths["item_features"])
     item_popularity = pd.read_parquet(paths["item_popularity"])
     return interactions, user_features, item_features, item_popularity
+
+
+def load_user_history_agg(feature_store_dir: str) -> Optional[pd.DataFrame]:
+    p = os.path.join(feature_store_dir, "user_history_agg.parquet")
+    if not os.path.exists(p):
+        return None
+    df = pd.read_parquet(p)
+    if "customer_id" not in df.columns:
+        return None
+    if "top_product_group_name" not in df.columns:
+        return None
+    out = df[["customer_id", "top_product_group_name"]].copy()
+    out["customer_id"] = out["customer_id"].astype(str)
+    out["top_product_group_name"] = out["top_product_group_name"].astype(str)
+    return out
 
 
 class InteractionsDataset(Dataset):
@@ -157,10 +172,14 @@ def main() -> None:
     print("reports_dir:", args.reports_dir)
 
     interactions, user_df, item_df, item_popularity = load_training_tables(args.feature_store_dir)
+    user_hist = load_user_history_agg(args.feature_store_dir)
 
     print("raw interactions rows:", int(len(interactions)))
     print("raw user_features rows:", int(len(user_df)))
     print("raw item_features rows:", int(len(item_df)))
+    print("user_history_agg loaded:", bool(user_hist is not None))
+    if user_hist is not None:
+        print("user_history_agg rows:", int(len(user_hist)))
 
     interactions = interactions.dropna(subset=["customer_id", "article_id", "t_dat"]).copy()
     interactions["customer_id"] = interactions["customer_id"].astype(str)
@@ -173,7 +192,12 @@ def main() -> None:
     print("unique customers in interactions:", int(interactions["customer_id"].nunique()))
     print("unique articles in interactions:", int(interactions["article_id"].nunique()))
 
-    enc = fit_encoders(user_df=user_df, item_df=item_df, interactions_df=interactions)
+    enc = fit_encoders(
+        user_df=user_df,
+        item_df=item_df,
+        interactions_df=interactions,
+        user_history_agg_df=user_hist,
+    )
 
     with open(os.path.join(args.registry_dir, "user_id_mapping.json"), "w", encoding="utf-8") as f:
         json.dump(enc.user_id_map, f, ensure_ascii=False)
@@ -183,7 +207,7 @@ def main() -> None:
     enc_path = os.path.join(args.registry_dir, "feature_encoders.json")
     save_encoders(enc, enc_path)
 
-    user_feat_mat, _ = transform_user_features(user_df, enc)
+    user_feat_mat, _ = transform_user_features(user_df, enc, user_history_agg_df=user_hist)
     item_feat_mat, _ = transform_item_features(item_df, enc)
 
     user_feat_mat_t = torch.as_tensor(user_feat_mat, dtype=torch.long, device="cpu")
@@ -208,6 +232,8 @@ def main() -> None:
 
     user_cat_cols = list(enc.user_cat_maps.keys())
     item_cat_cols = list(enc.item_cat_maps.keys())
+    print("user_cat_cols:", user_cat_cols)
+    print("item_cat_cols:", item_cat_cols)
 
     user_cat_sizes = {k: (max(v.values()) + 1) for k, v in enc.user_cat_maps.items()}
     item_cat_sizes = {k: (max(v.values()) + 1) for k, v in enc.item_cat_maps.items()}
@@ -234,8 +260,8 @@ def main() -> None:
             u_idx_cpu = u_idx.long().cpu()
             i_idx_cpu = i_idx.long().cpu()
 
-            u_feat = user_feat_mat_t.index_select(0, u_idx_cpu).to(device)
-            i_feat = item_feat_mat_t.index_select(0, i_idx_cpu).to(device)
+            u_feat = user_feat_mat_t.index_select(0, u_idx_cpu).to(device, non_blocking=True)
+            i_feat = item_feat_mat_t.index_select(0, i_idx_cpu).to(device, non_blocking=True)
 
             u_emb = model.user_forward(u_feat)
             i_emb = model.item_forward(i_feat)
@@ -277,7 +303,7 @@ def main() -> None:
         bs = int(args.item_embed_batch_size)
         for start in tqdm(range(0, num_items, bs), desc="item-embeddings"):
             end = min(start + bs, num_items)
-            feat = item_feat_mat_t[start:end].to(device)
+            feat = item_feat_mat_t[start:end].to(device, non_blocking=True)
             emb = model.item_forward(feat).detach().cpu().numpy().astype(np.float32)
             all_item_emb[start:end] = emb
 
@@ -316,6 +342,7 @@ def main() -> None:
         "trained_at": datetime.utcnow().isoformat() + "Z",
         "device": str(device),
         "feature_store_dir": str(args.feature_store_dir),
+        "uses_user_history_agg": bool(user_hist is not None),
         "artifacts": {
             "model": "two_tower_model.pt",
             "item_embeddings": "item_embeddings.npy",

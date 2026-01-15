@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import List
+from typing import List, Optional
 
 import numpy as np
 import pandas as pd
@@ -14,6 +14,19 @@ except Exception:
     faiss = None
 
 from features.preprocess import load_encoders, transform_user_features
+
+
+def load_user_history_agg(feature_store_dir: str) -> Optional[pd.DataFrame]:
+    p = os.path.join(feature_store_dir, "user_history_agg.parquet")
+    if not os.path.exists(p):
+        return None
+    df = pd.read_parquet(p)
+    if "customer_id" not in df.columns or "top_product_group_name" not in df.columns:
+        return None
+    out = df[["customer_id", "top_product_group_name"]].copy()
+    out["customer_id"] = out["customer_id"].astype(str)
+    out["top_product_group_name"] = out["top_product_group_name"].astype(str)
+    return out
 
 
 @dataclass
@@ -58,7 +71,9 @@ class RecommenderService:
         self.pop_list = pop["article_id"].tolist()
 
         user_df = pd.read_parquet(os.path.join(self.feature_store_dir, "user_features.parquet"))
-        user_feat_mat, _ = transform_user_features(user_df, self.enc)
+        user_hist = load_user_history_agg(self.feature_store_dir)
+
+        user_feat_mat, _ = transform_user_features(user_df, self.enc, user_history_agg_df=user_hist)
         self.user_feat_t = torch.as_tensor(user_feat_mat, dtype=torch.long, device="cpu")
 
         ckpt = torch.load(os.path.join(self.registry_dir, "two_tower_model.pt"), map_location="cpu")
