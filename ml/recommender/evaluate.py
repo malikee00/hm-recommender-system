@@ -18,9 +18,6 @@ except Exception:
 from features.preprocess import load_encoders, transform_user_features
 
 
-# -------------------------
-# Data loading (feature_store)
-# -------------------------
 def load_training_tables(feature_store_dir: str) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     interactions = pd.read_parquet(os.path.join(feature_store_dir, "interactions.parquet"))
     user_features = pd.read_parquet(os.path.join(feature_store_dir, "user_features.parquet"))
@@ -29,19 +26,14 @@ def load_training_tables(feature_store_dir: str) -> Tuple[pd.DataFrame, pd.DataF
     return interactions, user_features, item_features, item_popularity
 
 
-# -------------------------
-# Time-aware split: leave-last-out per user
-# -------------------------
 def leave_last_out_split(interactions: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
     df = interactions.copy()
     df["t_dat"] = pd.to_datetime(df["t_dat"])
     df = df.sort_values(["customer_id", "t_dat"])
 
-    # last interaction per user -> candidate test
     last_idx = df.groupby("customer_id")["t_dat"].idxmax()
     test = df.loc[last_idx].copy()
 
-    # only users with >=2 interactions are eligible for eval
     cnt = df.groupby("customer_id").size()
     eligible = set(cnt[cnt >= 2].index)
     test = test[test["customer_id"].isin(eligible)]
@@ -50,15 +42,10 @@ def leave_last_out_split(interactions: pd.DataFrame) -> Tuple[pd.DataFrame, pd.D
     return train, test
 
 
-# -------------------------
-# Metrics
-# -------------------------
 def precision_recall_at_k(recs: List[str], gt: str, k: int) -> Tuple[float, float]:
     topk = recs[:k]
     hit = 1.0 if gt in topk else 0.0
-    precision = hit / float(k)
-    recall = hit
-    return precision, recall
+    return hit / float(k), hit
 
 
 def ndcg_at_k(recs: List[str], gt: str, k: int) -> float:
@@ -95,39 +82,32 @@ def compute_metrics(reco_map: Dict[str, List[str]], gt_map: Dict[str, str], ks=(
     return out
 
 
-# -------------------------
-# FAISS
-# -------------------------
 def load_faiss_index(path: str):
     if faiss is None:
         raise RuntimeError("faiss tidak terinstall. Install faiss-cpu terlebih dahulu.")
     return faiss.read_index(path)
 
 
-# -------------------------
-# Main
-# -------------------------
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--feature_store_dir", default="data/feature_store")
     ap.add_argument("--registry_dir", default="ml/registry/recommender")
     ap.add_argument("--reports_dir", default="ml/reports/recommender")
-    ap.add_argument("--topk_max", type=int, default=50, help="ambil lebih banyak lalu filter seen-items")
+    ap.add_argument("--topk_max", type=int, default=50)
     ap.add_argument("--ks", default="5,10,20")
-    ap.add_argument("--eval_max_users", type=int, default=0, help="0=all, >0 batasi jumlah user eval (debug/cepat)")
+    ap.add_argument("--eval_max_users", type=int, default=0, help="0=all, >0 batasi user eval (debug)")
+    ap.add_argument("--seen_cap_per_user", type=int, default=200, help="batasi seen items per user (hemat RAM)")
     args = ap.parse_args()
 
     ks = tuple(int(x.strip()) for x in args.ks.split(","))
     os.makedirs(args.reports_dir, exist_ok=True)
 
-    # load feature store
     interactions, user_df, item_df, item_popularity = load_training_tables(args.feature_store_dir)
 
     interactions = interactions.dropna(subset=["customer_id", "article_id", "t_dat"]).copy()
     interactions["customer_id"] = interactions["customer_id"].astype(str)
     interactions["article_id"] = interactions["article_id"].astype(str)
 
-    # time-aware split
     train_df, test_df = leave_last_out_split(interactions)
 
     split_stats = {
@@ -135,29 +115,24 @@ def main() -> None:
         "test_rows": int(len(test_df)),
         "num_users_total": int(interactions["customer_id"].nunique()),
         "num_users_eval": int(test_df["customer_id"].nunique()),
-        "avg_history_len_train": float(train_df.groupby("customer_id").size().mean()) if len(train_df) > 0 else 0.0,
+        "avg_history_len_train": float(train_df.groupby("customer_id").size().mean()) if len(train_df) else 0.0,
     }
     with open(os.path.join(args.reports_dir, "split_stats.json"), "w", encoding="utf-8") as f:
         json.dump(split_stats, f, indent=2)
 
-    # load encoders (contains user_id_map & item_id_map)
     enc = load_encoders(os.path.join(args.registry_dir, "feature_encoders.json"))
 
-    # invert item mapping: internal_index -> article_id
     inv_item = [None] * len(enc.item_id_map)
     for iid, idx in enc.item_id_map.items():
         inv_item[idx] = iid
 
-    # load faiss index
     index = load_faiss_index(os.path.join(args.registry_dir, "faiss.index"))
 
-    # build user feature matrix aligned to enc.user_id_map
     user_feat_mat, _ = transform_user_features(user_df, enc)
     user_feat_t = torch.as_tensor(user_feat_mat, dtype=torch.long, device="cpu")
 
-    # load model + TwoTower definition from train.py 
     ckpt = torch.load(os.path.join(args.registry_dir, "two_tower_model.pt"), map_location="cpu")
-    from .train import TwoTower  # reuse exact class from training
+    from .train import TwoTower
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -171,44 +146,43 @@ def main() -> None:
     model = model.to(device)
     model.eval()
 
-    # ground truth: user -> last item
     gt_map: Dict[str, str] = dict(zip(test_df["customer_id"].tolist(), test_df["article_id"].tolist()))
-
-    # optionally limit users (debug)
     eval_users = list(gt_map.keys())
     if args.eval_max_users and args.eval_max_users > 0:
         eval_users = eval_users[: args.eval_max_users]
         gt_map = {u: gt_map[u] for u in eval_users}
 
-    # seen items from train (filter)
-    seen = defaultdict(set)
-    for u, i in zip(train_df["customer_id"].tolist(), train_df["article_id"].tolist()):
-        seen[u].add(i)
+    eval_user_set = set(eval_users)
+    train_sub = train_df[train_df["customer_id"].isin(eval_user_set)][["customer_id", "article_id"]]
 
-    # recommend using faiss
+    seen = defaultdict(list)
+    for u, i in zip(train_sub["customer_id"].to_numpy(), train_sub["article_id"].to_numpy()):
+        if len(seen[u]) < args.seen_cap_per_user:
+            seen[u].append(i)
+    seen_sets = {u: set(v) for u, v in seen.items()}  
+
     reco_map: Dict[str, List[str]] = {}
-    bs = 4096
     user_to_index = enc.user_id_map
+    bs = 4096
 
     for start in range(0, len(eval_users), bs):
         batch_users = eval_users[start : start + bs]
-
         idxs = [user_to_index.get(u, None) for u in batch_users]
         pairs = [(u, idx) for u, idx in zip(batch_users, idxs) if idx is not None]
         if not pairs:
             continue
 
         u_list, u_idx_list = zip(*pairs)
+        idx_t = torch.tensor(u_idx_list, dtype=torch.long, device="cpu")
 
-        feats = user_feat_t.index_select(0, torch.tensor(u_idx_list, dtype=torch.long)).to(device, non_blocking=True)
-
+        feats = user_feat_t.index_select(0, idx_t).to(device, non_blocking=True)
         with torch.no_grad():
             u_emb = model.user_forward(feats).detach().cpu().numpy().astype(np.float32)
 
-        # faiss search
         D, I = index.search(u_emb, args.topk_max)
 
         for u, item_internal_idxs in zip(u_list, I):
+            s = seen_sets.get(u, set())
             recs: List[str] = []
             for item_internal_idx in item_internal_idxs.tolist():
                 if item_internal_idx < 0 or item_internal_idx >= len(inv_item):
@@ -216,21 +190,17 @@ def main() -> None:
                 iid = inv_item[item_internal_idx]
                 if iid is None:
                     continue
-                if iid in seen[u]:
+                if iid in s:
                     continue
                 recs.append(iid)
             reco_map[u] = recs
 
-    # model metrics
     model_metrics = compute_metrics(reco_map, gt_map, ks=ks)
     with open(os.path.join(args.reports_dir, "metrics.json"), "w", encoding="utf-8") as f:
         json.dump(model_metrics, f, indent=2)
 
-    # baseline metrics (popularity)
     pop = item_popularity.copy()
     pop["article_id"] = pop["article_id"].astype(str)
-
-    # sort: purchase_count desc, popularity_rank asc (if exists)
     if "purchase_count" in pop.columns and "popularity_rank" in pop.columns:
         pop = pop.sort_values(["purchase_count", "popularity_rank"], ascending=[False, True])
     elif "purchase_count" in pop.columns:
