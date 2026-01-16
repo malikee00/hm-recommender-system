@@ -143,6 +143,25 @@ def build_faiss_index(item_emb: np.ndarray, out_path: str) -> None:
     faiss.write_index(index, out_path)
 
 
+def sample_negatives_uniform(pos_i: torch.Tensor, num_items: int) -> torch.Tensor:
+    neg = torch.randint(low=0, high=num_items, size=pos_i.shape, device=pos_i.device, dtype=torch.long)
+    mask = neg.eq(pos_i)
+    if mask.any():
+        neg2 = torch.randint(low=0, high=num_items, size=pos_i.shape, device=pos_i.device, dtype=torch.long)
+        neg = torch.where(mask, neg2, neg)
+        mask = neg.eq(pos_i)
+        if mask.any():
+            neg = (neg + 1) % num_items
+    return neg
+
+
+def bpr_loss(u: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor) -> torch.Tensor:
+    pos_scores = (u * pos).sum(dim=1)
+    neg_scores = (u * neg).sum(dim=1)
+    x = pos_scores - neg_scores
+    return -torch.log(torch.sigmoid(x) + 1e-12).mean()
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--feature_store_dir", default="data/feature_store")
@@ -156,6 +175,8 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--item_embed_batch_size", type=int, default=8192)
     ap.add_argument("--skip_faiss", action="store_true")
+    ap.add_argument("--objective", choices=["inbatch_ce", "bpr"], default="bpr")
+    ap.add_argument("--bpr_weight_decay", type=float, default=0.0)
     args = ap.parse_args()
 
     torch.manual_seed(int(args.seed))
@@ -170,6 +191,7 @@ def main() -> None:
     print("feature_store_dir:", args.feature_store_dir)
     print("registry_dir:", args.registry_dir)
     print("reports_dir:", args.reports_dir)
+    print("objective:", args.objective)
 
     interactions, user_df, item_df, item_popularity = load_training_tables(args.feature_store_dir)
     user_hist = load_user_history_agg(args.feature_store_dir)
@@ -178,8 +200,6 @@ def main() -> None:
     print("raw user_features rows:", int(len(user_df)))
     print("raw item_features rows:", int(len(item_df)))
     print("user_history_agg loaded:", bool(user_hist is not None))
-    if user_hist is not None:
-        print("user_history_agg rows:", int(len(user_hist)))
 
     interactions = interactions.dropna(subset=["customer_id", "article_id", "t_dat"]).copy()
     interactions["customer_id"] = interactions["customer_id"].astype(str)
@@ -247,8 +267,11 @@ def main() -> None:
         item_cat_cols=item_cat_cols,
     ).to(device)
 
-    opt = torch.optim.Adam(model.parameters(), lr=float(args.lr))
-    loss_fn = nn.CrossEntropyLoss()
+    if args.objective == "inbatch_ce":
+        loss_fn = nn.CrossEntropyLoss()
+    opt = torch.optim.Adam(model.parameters(), lr=float(args.lr), weight_decay=float(args.bpr_weight_decay))
+
+    num_items_total = int(len(enc.item_id_map))
 
     model.train()
     for ep in range(1, int(args.epochs) + 1):
@@ -258,18 +281,23 @@ def main() -> None:
 
         for u_idx, i_idx in pbar:
             u_idx_cpu = u_idx.long().cpu()
-            i_idx_cpu = i_idx.long().cpu()
+            pos_i_idx_cpu = i_idx.long().cpu()
 
             u_feat = user_feat_mat_t.index_select(0, u_idx_cpu).to(device, non_blocking=True)
-            i_feat = item_feat_mat_t.index_select(0, i_idx_cpu).to(device, non_blocking=True)
+            pos_feat = item_feat_mat_t.index_select(0, pos_i_idx_cpu).to(device, non_blocking=True)
 
             u_emb = model.user_forward(u_feat)
-            i_emb = model.item_forward(i_feat)
+            pos_emb = model.item_forward(pos_feat)
 
-            logits = u_emb @ i_emb.t()
-            target = torch.arange(logits.size(0), device=device, dtype=torch.long)
-
-            loss = loss_fn(logits, target)
+            if args.objective == "inbatch_ce":
+                logits = u_emb @ pos_emb.t()
+                target = torch.arange(logits.size(0), device=device, dtype=torch.long)
+                loss = loss_fn(logits, target)
+            else:
+                neg_i_idx = sample_negatives_uniform(pos_i_idx_cpu.to(device), num_items_total)
+                neg_feat = item_feat_mat_t.index_select(0, neg_i_idx.detach().cpu()).to(device, non_blocking=True)
+                neg_emb = model.item_forward(neg_feat)
+                loss = bpr_loss(u_emb, pos_emb, neg_emb)
 
             opt.zero_grad(set_to_none=True)
             loss.backward()
@@ -332,10 +360,12 @@ def main() -> None:
 
     meta = {
         "model_type": "two-tower",
+        "objective": str(args.objective),
         "embedding_dim": int(args.embedding_dim),
         "epochs": int(args.epochs),
         "batch_size": int(effective_bs),
         "lr": float(args.lr),
+        "max_interactions": int(args.max_interactions),
         "train_rows": int(len(interactions)),
         "num_users": int(len(enc.user_id_map)),
         "num_items": int(len(enc.item_id_map)),
