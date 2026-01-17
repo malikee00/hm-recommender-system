@@ -149,9 +149,9 @@ def sample_negatives_uniform(pos_i: torch.Tensor, num_items: int) -> torch.Tenso
     if mask.any():
         neg2 = torch.randint(low=0, high=num_items, size=pos_i.shape, device=pos_i.device, dtype=torch.long)
         neg = torch.where(mask, neg2, neg)
-        mask = neg.eq(pos_i)
-        if mask.any():
-            neg = (neg + 1) % num_items
+    mask = neg.eq(pos_i)
+    if mask.any():
+        neg = (neg + 1) % num_items
     return neg
 
 
@@ -160,6 +160,112 @@ def bpr_loss(u: torch.Tensor, pos: torch.Tensor, neg: torch.Tensor) -> torch.Ten
     neg_scores = (u * neg).sum(dim=1)
     x = pos_scores - neg_scores
     return -torch.log(torch.sigmoid(x) + 1e-12).mean()
+
+
+class PopularNegSampler:
+    def __init__(
+        self,
+        item_popularity_df: pd.DataFrame,
+        item_id_map: Dict[str, int],
+        power: float = 0.75,
+        top_n: int = 0,
+    ):
+        df = item_popularity_df.copy()
+        if "article_id" not in df.columns:
+            raise ValueError("item_popularity.parquet harus punya kolom 'article_id'")
+        df["article_id"] = df["article_id"].astype(str)
+
+        if "purchase_count" in df.columns:
+            w = df["purchase_count"].astype(float).to_numpy()
+        elif "popularity_rank" in df.columns:
+            r = df["popularity_rank"].astype(float).to_numpy()
+            w = 1.0 / np.maximum(r, 1.0)
+        else:
+            w = np.ones(len(df), dtype=float)
+
+        idxs: List[int] = []
+        weights: List[float] = []
+        for aid, ww in zip(df["article_id"].tolist(), w.tolist()):
+            j = item_id_map.get(aid, None)
+            if j is None:
+                continue
+            if ww <= 0 or not np.isfinite(ww):
+                continue
+            idxs.append(int(j))
+            weights.append(float(ww))
+
+        if not idxs:
+            self.idxs = None
+            self.probs = None
+            return
+
+        idxs = np.asarray(idxs, dtype=np.int64)
+        weights = np.asarray(weights, dtype=np.float64)
+
+        if power != 1.0:
+            weights = np.power(weights, float(power))
+
+        if top_n and top_n > 0 and top_n < len(idxs):
+            order = np.argsort(weights)[::-1]
+            order = order[: int(top_n)]
+            idxs = idxs[order]
+            weights = weights[order]
+
+        s = weights.sum()
+        if s <= 0:
+            self.idxs = None
+            self.probs = None
+            return
+
+        self.idxs = idxs
+        self.probs = (weights / s).astype(np.float64)
+
+    def sample(self, batch_size: int, device: torch.device) -> torch.Tensor:
+        if self.idxs is None or self.probs is None:
+            raise RuntimeError("popular sampler tidak siap (idxs/probs kosong)")
+        choice = np.random.choice(self.idxs, size=int(batch_size), replace=True, p=self.probs)
+        return torch.as_tensor(choice, dtype=torch.long, device=device)
+
+
+def sample_negatives(
+    pos_i: torch.Tensor,
+    num_items: int,
+    mode: str,
+    popular_sampler: Optional[PopularNegSampler],
+    device: torch.device,
+    mixed_alpha: float,
+) -> torch.Tensor:
+    mode = str(mode).lower()
+    bs = int(pos_i.numel())
+
+    if mode == "uniform" or popular_sampler is None:
+        return sample_negatives_uniform(pos_i, num_items)
+
+    if mode == "popular":
+        neg = popular_sampler.sample(bs, device=device).view_as(pos_i)
+
+    elif mode == "mixed":
+        neg_pop = popular_sampler.sample(bs, device=device).view_as(pos_i)
+        neg_uni = sample_negatives_uniform(pos_i, num_items)
+        m = torch.rand_like(pos_i.float()) < float(mixed_alpha)
+        neg = torch.where(m, neg_pop, neg_uni)
+
+    else:
+        raise ValueError("neg_sampling harus salah satu dari: uniform, popular, mixed")
+
+    mask = neg.eq(pos_i)
+    if mask.any():
+        if mode == "popular":
+            neg2 = popular_sampler.sample(bs, device=device).view_as(pos_i)
+        else:
+            neg2 = sample_negatives_uniform(pos_i, num_items)
+        neg = torch.where(mask, neg2, neg)
+
+    mask = neg.eq(pos_i)
+    if mask.any():
+        neg = (neg + 1) % num_items
+
+    return neg
 
 
 def main() -> None:
@@ -176,7 +282,13 @@ def main() -> None:
     ap.add_argument("--item_embed_batch_size", type=int, default=8192)
     ap.add_argument("--skip_faiss", action="store_true")
     ap.add_argument("--objective", choices=["inbatch_ce", "bpr"], default="bpr")
-    ap.add_argument("--bpr_weight_decay", type=float, default=0.0)
+    ap.add_argument("--weight_decay", type=float, default=0.0)
+
+    ap.add_argument("--neg_sampling", choices=["uniform", "popular", "mixed"], default="mixed")
+    ap.add_argument("--popular_power", type=float, default=0.75)
+    ap.add_argument("--popular_top_n", type=int, default=0)
+    ap.add_argument("--mixed_alpha", type=float, default=0.5)
+
     args = ap.parse_args()
 
     torch.manual_seed(int(args.seed))
@@ -187,11 +299,13 @@ def main() -> None:
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     use_cuda = device.type == "cuda"
+
     print("device:", device)
     print("feature_store_dir:", args.feature_store_dir)
     print("registry_dir:", args.registry_dir)
     print("reports_dir:", args.reports_dir)
     print("objective:", args.objective)
+    print("neg_sampling:", args.neg_sampling)
 
     interactions, user_df, item_df, item_popularity = load_training_tables(args.feature_store_dir)
     user_hist = load_user_history_agg(args.feature_store_dir)
@@ -267,11 +381,20 @@ def main() -> None:
         item_cat_cols=item_cat_cols,
     ).to(device)
 
-    if args.objective == "inbatch_ce":
-        loss_fn = nn.CrossEntropyLoss()
-    opt = torch.optim.Adam(model.parameters(), lr=float(args.lr), weight_decay=float(args.bpr_weight_decay))
+    opt = torch.optim.Adam(model.parameters(), lr=float(args.lr), weight_decay=float(args.weight_decay))
+    loss_fn = nn.CrossEntropyLoss()
 
     num_items_total = int(len(enc.item_id_map))
+    popular_sampler = None
+    if args.neg_sampling in ("popular", "mixed"):
+        popular_sampler = PopularNegSampler(
+            item_popularity_df=item_popularity,
+            item_id_map=enc.item_id_map,
+            power=float(args.popular_power),
+            top_n=int(args.popular_top_n),
+        )
+        if popular_sampler.idxs is None:
+            print("popular sampler fallback -> uniform (mapping kosong)")
 
     model.train()
     for ep in range(1, int(args.epochs) + 1):
@@ -279,9 +402,9 @@ def main() -> None:
         total_loss = 0.0
         n = 0
 
-        for u_idx, i_idx in pbar:
+        for u_idx, pos_i_idx in pbar:
             u_idx_cpu = u_idx.long().cpu()
-            pos_i_idx_cpu = i_idx.long().cpu()
+            pos_i_idx_cpu = pos_i_idx.long().cpu()
 
             u_feat = user_feat_mat_t.index_select(0, u_idx_cpu).to(device, non_blocking=True)
             pos_feat = item_feat_mat_t.index_select(0, pos_i_idx_cpu).to(device, non_blocking=True)
@@ -294,7 +417,14 @@ def main() -> None:
                 target = torch.arange(logits.size(0), device=device, dtype=torch.long)
                 loss = loss_fn(logits, target)
             else:
-                neg_i_idx = sample_negatives_uniform(pos_i_idx_cpu.to(device), num_items_total)
+                neg_i_idx = sample_negatives(
+                    pos_i=pos_i_idx_cpu.to(device, non_blocking=True),
+                    num_items=num_items_total,
+                    mode=str(args.neg_sampling),
+                    popular_sampler=popular_sampler,
+                    device=device,
+                    mixed_alpha=float(args.mixed_alpha),
+                )
                 neg_feat = item_feat_mat_t.index_select(0, neg_i_idx.detach().cpu()).to(device, non_blocking=True)
                 neg_emb = model.item_forward(neg_feat)
                 loss = bpr_loss(u_emb, pos_emb, neg_emb)
@@ -361,10 +491,15 @@ def main() -> None:
     meta = {
         "model_type": "two-tower",
         "objective": str(args.objective),
+        "neg_sampling": str(args.neg_sampling),
+        "popular_power": float(args.popular_power),
+        "popular_top_n": int(args.popular_top_n),
+        "mixed_alpha": float(args.mixed_alpha),
         "embedding_dim": int(args.embedding_dim),
         "epochs": int(args.epochs),
         "batch_size": int(effective_bs),
         "lr": float(args.lr),
+        "weight_decay": float(args.weight_decay),
         "max_interactions": int(args.max_interactions),
         "train_rows": int(len(interactions)),
         "num_users": int(len(enc.user_id_map)),
@@ -383,6 +518,7 @@ def main() -> None:
             "item_popularity": "item_popularity.csv",
         },
     }
+
     meta_path = os.path.join(args.registry_dir, "metadata.json")
     with open(meta_path, "w", encoding="utf-8") as f:
         json.dump(meta, f, ensure_ascii=False, indent=2)
