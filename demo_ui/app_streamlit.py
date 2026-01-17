@@ -14,8 +14,8 @@ from image_utils import ImageConfig, get_image_path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 FEATURE_STORE_DIR = PROJECT_ROOT / "data" / "feature_store"
 ASSETS_DIR = Path(__file__).resolve().parent / "assets"
-IMAGES_DIR = ASSETS_DIR / "images"
-PLACEHOLDER_PATH = IMAGES_DIR / "placeholder.jpg"
+IMAGES_DIR = PROJECT_ROOT / "data" / "raw" / "hm" / "images_128_128"
+PLACEHOLDER_PATH = ASSETS_DIR / "images" / "placeholder.jpg"
 
 API_BASE_URL = os.getenv("API_BASE_URL", "http://127.0.0.1:8000").rstrip("/")
 
