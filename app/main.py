@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import AppConfig
 from app.schemas import (
@@ -10,30 +11,53 @@ from app.schemas import (
     BaselineRequest,
     BaselineResponse,
     RecommendationItem,
+    MetadataResponse,
 )
 from app.service import AppService
 
-app = FastAPI(title="H&M Recommender API", version="1.0.0")
-
 cfg = AppConfig.from_env()
 app_service = AppService(cfg)
+
+app = FastAPI(title=cfg.service_name, version=cfg.service_version)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=cfg.api_cors_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.on_event("startup")
 def startup_event():
     try:
         app_service.load_artifacts()
-    except Exception as e:
-        raise RuntimeError(f"Startup failed: {e}")
+    except Exception:
+        return
 
 
 @app.get("/health", response_model=HealthResponse)
 def health():
+    loaded = app_service.is_loaded
+    detail = None if loaded else (app_service.last_error or "Service not ready")
+
     return HealthResponse(
         status="ok",
-        model_loaded=app_service.is_loaded,
+        service=cfg.service_name,
+        version=cfg.service_version,
+        model_loaded=loaded,
+        ready=loaded,
         artifact_version=app_service.artifact_version(),
+        detail=detail,
     )
+
+
+@app.get("/metadata", response_model=MetadataResponse)
+def metadata():
+    if not app_service.is_loaded:
+        raise HTTPException(status_code=503, detail="Service not ready")
+    return MetadataResponse(metadata=app_service.get_metadata())
 
 
 @app.post("/recommend", response_model=RecommendResponse)
@@ -63,6 +87,7 @@ def baseline(req: BaselineRequest):
 
     return BaselineResponse(
         top_k=req.top_k,
+        is_fallback=True,
         recommendations=[
             RecommendationItem(article_id=r.article_id, score=r.score)
             for r in result.recommendations

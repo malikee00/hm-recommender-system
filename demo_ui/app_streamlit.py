@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-import json
+import time
 from pathlib import Path
 
 import pandas as pd
@@ -14,6 +14,7 @@ from image_utils import ImageConfig, get_image_path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 FEATURE_STORE_DIR = PROJECT_ROOT / "data" / "feature_store"
 ASSETS_DIR = Path(__file__).resolve().parent / "assets"
+
 IMAGES_DIR = PROJECT_ROOT / "data" / "raw" / "hm" / "images_128_128"
 PLACEHOLDER_PATH = ASSETS_DIR / "images" / "placeholder.jpg"
 
@@ -39,12 +40,9 @@ def load_user_history_agg() -> pd.DataFrame | None:
 
 
 def build_title(row: pd.Series) -> str:
-    pt = row.get("product_type_name", "")
-    cg = row.get("colour_group_name", "")
-    dep = row.get("department_name", "")
-    pt = "" if pd.isna(pt) else str(pt)
-    cg = "" if pd.isna(cg) else str(cg)
-    dep = "" if pd.isna(dep) else str(dep)
+    pt = "" if pd.isna(row.get("product_type_name", "")) else str(row.get("product_type_name", ""))
+    cg = "" if pd.isna(row.get("colour_group_name", "")) else str(row.get("colour_group_name", ""))
+    dep = "" if pd.isna(row.get("department_name", "")) else str(row.get("department_name", ""))
 
     if pt and cg:
         return f"{pt} — {cg}"
@@ -55,40 +53,57 @@ def build_title(row: pd.Series) -> str:
     return "Item"
 
 
-def post_json(path: str, payload: dict) -> dict:
+def post_json(path: str, payload: dict, retries: int = 3, timeout_s: int = 180) -> dict:
     url = f"{API_BASE_URL}{path}"
-    r = requests.post(url, json=payload, timeout=60)
-    r.raise_for_status()
-    return r.json()
+    last_err: Exception | None = None
+
+    for _ in range(retries):
+        try:
+            r = requests.post(url, json=payload, timeout=timeout_s)
+            r.raise_for_status()
+            return r.json()
+        except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError) as e:
+            last_err = e
+            time.sleep(1.5)
+        except requests.HTTPError as e:
+            try:
+                detail = r.text
+            except Exception:
+                detail = ""
+            raise requests.HTTPError(f"{e} | body={detail[:500]}") from e
+
+    raise last_err if last_err is not None else RuntimeError("Unknown request error")
 
 
 def render_cards(title: str, recs: list[dict], item_feat: pd.DataFrame, img_cfg: ImageConfig, cols: int = 5):
     st.subheader(title)
+
     if not recs:
         st.info("No results.")
         return
 
     grid = st.columns(cols)
+
     for i, rec in enumerate(recs):
         c = grid[i % cols]
-        article_id = str(rec["article_id"])
+        article_id = str(rec.get("article_id", ""))
         score = float(rec.get("score", 0.0))
 
         with c:
             img_path = get_image_path(article_id, img_cfg)
             st.image(str(img_path), use_container_width=True)
 
-            row = item_feat.loc[article_id] if article_id in item_feat.index else None
-            if row is not None:
-                t = build_title(row)
-                st.markdown(f"**{t}**")
-                meta_line = []
+            if article_id in item_feat.index:
+                row = item_feat.loc[article_id]
+                st.markdown(f"**{build_title(row)}**")
+
+                meta = []
                 for k in ["department_name", "product_group_name", "section_name"]:
                     v = row.get(k, None)
                     if v is not None and not pd.isna(v):
-                        meta_line.append(str(v))
-                if meta_line:
-                    st.caption(" • ".join(meta_line[:3]))
+                        meta.append(str(v))
+                if meta:
+                    st.caption(" • ".join(meta[:3]))
             else:
                 st.markdown("**Item**")
 
@@ -98,6 +113,7 @@ def render_cards(title: str, recs: list[dict], item_feat: pd.DataFrame, img_cfg:
 
 st.set_page_config(page_title="H&M Recommender Demo", layout="wide")
 st.title("H&M Personalized Recommender (Two-Tower + FAISS)")
+st.caption(f"API_BASE_URL: {API_BASE_URL}")
 
 with st.sidebar:
     st.header("Settings")
@@ -105,7 +121,6 @@ with st.sidebar:
     top_k = st.slider("top_k", min_value=1, max_value=20, value=10, step=1)
     run_btn = st.button("Recommend")
 
-st.caption(f"API_BASE_URL: {API_BASE_URL}")
 
 item_feat = load_item_features()
 user_hist = load_user_history_agg()
@@ -126,29 +141,19 @@ if run_btn:
             st.dataframe(u[show_cols].head(5), use_container_width=True)
 
     try:
-        model_out = post_json("/recommend", {"customer_id": str(customer_id), "top_k": int(top_k)})
-        base_out = post_json("/baseline", {"top_k": int(top_k)})
-    except requests.HTTPError as e:
-        st.error(f"API request failed: {e}")
+        api_k = max(int(top_k), 50)
+        model_out = post_json("/recommend", {"customer_id": str(customer_id), "top_k": api_k})
+        base_out = post_json("/baseline", {"top_k": api_k})
+    except Exception as e:
+        st.error(str(e))
         st.stop()
 
+    model_recs = model_out.get("recommendations", [])[: int(top_k)]
+    base_recs = base_out.get("recommendations", [])[: int(top_k)]
     is_fallback = bool(model_out.get("is_fallback", False))
 
-    render_cards(
-        "Personalized Recommendations (Model)",
-        model_out.get("recommendations", []),
-        item_feat,
-        img_cfg,
-        cols=5,
-    )
-
-    render_cards(
-        "Popular Baseline (No ML)",
-        base_out.get("recommendations", []),
-        item_feat,
-        img_cfg,
-        cols=5,
-    )
+    render_cards("Personalized Recommendations (Model)", model_recs, item_feat, img_cfg, cols=5)
+    render_cards("Popular Baseline (No ML)", base_recs, item_feat, img_cfg, cols=5)
 
     if is_fallback:
         st.warning("User not found → showing popular items (cold-start fallback).")

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 
 @dataclass(frozen=True)
@@ -12,7 +11,10 @@ class ImageConfig:
 
 
 def article_id_to_path(article_id: str, images_dir: Path) -> Path:
-    return images_dir / f"{str(article_id)}.jpg"
+    aid = str(article_id)
+    aid10 = aid.zfill(10)
+    folder = aid10[:3]
+    return images_dir / folder / f"{aid10}.jpg"
 
 
 def get_image_path(article_id: str, cfg: ImageConfig) -> Path:

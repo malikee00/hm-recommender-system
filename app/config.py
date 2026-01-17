@@ -3,10 +3,21 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import List
+
+
+def _parse_csv_env(name: str, default: str) -> List[str]:
+    raw = os.getenv(name, default).strip()
+    if not raw:
+        return []
+    return [x.strip() for x in raw.split(",") if x.strip()]
 
 
 @dataclass(frozen=True)
 class AppConfig:
+    service_name: str
+    service_version: str
+
     project_root: Path
     feature_store_dir: Path
     registry_run_dir: Path
@@ -16,6 +27,9 @@ class AppConfig:
     encoders_path: Path
     item_popularity_path: Path
     metadata_path: Path
+
+    # CORS
+    api_cors_origins: List[str]
 
     @staticmethod
     def from_env() -> "AppConfig":
@@ -35,7 +49,14 @@ class AppConfig:
             os.getenv("REGISTRY_RUN_DIR", str(registry_base_dir / run_id))
         ).resolve()
 
+        cors_origins = _parse_csv_env(
+            "CORS_ORIGINS",
+            "http://localhost:3000,http://127.0.0.1:3000",
+        )
+
         cfg = AppConfig(
+            service_name=os.getenv("SERVICE_NAME", "H&M Recommender API"),
+            service_version=os.getenv("SERVICE_VERSION", "1.0.0"),
             project_root=project_root,
             feature_store_dir=feature_store_dir,
             registry_run_dir=registry_run_dir,
@@ -44,6 +65,7 @@ class AppConfig:
             encoders_path=registry_run_dir / "feature_encoders.json",
             item_popularity_path=registry_run_dir / "item_popularity.csv",
             metadata_path=registry_run_dir / "metadata.json",
+            api_cors_origins=cors_origins,
         )
 
         cfg.validate()
