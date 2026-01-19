@@ -6,6 +6,19 @@ from pathlib import Path
 from typing import List, Optional
 
 
+def _try_load_dotenv(project_root: Path) -> None:
+    env_path = project_root / ".env"
+    if not env_path.exists():
+        return
+
+    try:
+        from dotenv import load_dotenv  # type: ignore
+    except Exception:
+        return
+
+    load_dotenv(dotenv_path=str(env_path), override=False)
+
+
 def _parse_csv_env(name: str, default: str) -> List[str]:
     raw = os.getenv(name, default).strip()
     if not raw:
@@ -40,6 +53,9 @@ class AppConfig:
     def from_env() -> "AppConfig":
         project_root = Path(os.getenv("PROJECT_ROOT", Path(__file__).resolve().parents[1])).resolve()
 
+        # load .env if exists
+        _try_load_dotenv(project_root)
+
         feature_store_dir = Path(
             os.getenv("FEATURE_STORE_DIR", str(project_root / "data" / "feature_store"))
         ).resolve()
@@ -56,10 +72,10 @@ class AppConfig:
 
         cors_origins = _parse_csv_env(
             "CORS_ORIGINS",
-            "http://localhost:3000,http://127.0.0.1:3000",
+            "http://localhost:8501,http://127.0.0.1:8501,http://localhost:3000,http://127.0.0.1:3000",
         )
 
-        image_base_url = os.getenv("IMAGE_BASE_URL", "").rstrip("/")
+        image_base_url = os.getenv("IMAGE_BASE_URL", "").strip().rstrip("/")
         artifacts_url = os.getenv("ARTIFACTS_URL", "").strip() or None
 
         cfg = AppConfig(
@@ -86,6 +102,4 @@ class AppConfig:
     def validate_non_artifact(self) -> None:
         if not self.feature_store_dir.exists():
             raise FileNotFoundError(f"Feature store dir not found: {self.feature_store_dir}")
-
-        if not self.image_base_url:
-            raise ValueError("IMAGE_BASE_URL must be set (e.g., https://pub-xxxxx.r2.dev/hm-images)")
+        return

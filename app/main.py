@@ -34,6 +34,7 @@ def startup_event():
     try:
         app_service.load_artifacts()
     except Exception:
+        # error sudah disimpan ke app_service.last_error
         return
 
 

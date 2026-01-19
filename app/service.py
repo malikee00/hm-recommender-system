@@ -43,6 +43,9 @@ class AppService:
         return meta.get("run_id") or meta.get("model_type") or meta.get("objective")
 
     def build_image_url(self, article_id: str) -> str:
+        if not self.cfg.image_base_url:
+            return "https://via.placeholder.com/128?text=No+Image"
+
         article_id = str(article_id)
         prefix = article_id[:3]
         return f"{self.cfg.image_base_url}/{prefix}/{article_id}.jpg"
@@ -128,8 +131,7 @@ class AppService:
                 if attempt == max_attempts:
                     raise RuntimeError(f"Failed to download artifacts zip from {url}: {e}")
 
-                sleep_s = min(2 ** attempt, backoff_cap)
-                time.sleep(sleep_s)
+                time.sleep(min(2 ** attempt, backoff_cap))
 
     def _extract_zip_into_registry(self, zip_path: Path, target_dir: Path) -> None:
         with zipfile.ZipFile(zip_path, "r") as zf:
