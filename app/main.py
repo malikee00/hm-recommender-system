@@ -5,13 +5,13 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import AppConfig
 from app.schemas import (
-    HealthResponse,
-    RecommendRequest,
-    RecommendResponse,
     BaselineRequest,
     BaselineResponse,
-    RecommendationItem,
+    HealthResponse,
     MetadataResponse,
+    RecommendRequest,
+    RecommendResponse,
+    RecommendationItem,
 )
 from app.service import AppService
 
@@ -72,7 +72,11 @@ def recommend(req: RecommendRequest):
         top_k=result.top_k,
         is_fallback=result.is_fallback,
         recommendations=[
-            RecommendationItem(article_id=r.article_id, score=r.score)
+            RecommendationItem(
+                article_id=r.article_id,
+                score=r.score,
+                image_url=app_service.build_image_url(r.article_id),
+            )
             for r in result.recommendations
         ],
     )
@@ -89,7 +93,11 @@ def baseline(req: BaselineRequest):
         top_k=req.top_k,
         is_fallback=True,
         recommendations=[
-            RecommendationItem(article_id=r.article_id, score=r.score)
+            RecommendationItem(
+                article_id=r.article_id,
+                score=r.score,
+                image_url=app_service.build_image_url(r.article_id),
+            )
             for r in result.recommendations
         ],
     )
