@@ -1,0 +1,51 @@
+# Python / venv
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Git
+.git/
+.gitignore
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+
+# Notebooks & logs
+*.ipynb
+*.log
+
+# Big data / artifacts (IMPORTANT)
+data/
+ml/registry/
+ml_hm_project/ml/registry/
+**/*.parquet
+**/*.csv
+**/*.zip
+**/*.npy
+**/*.npz
+**/*.pt
+**/*.pth
+**/*.pkl
+
+# Images (IMPORTANT)
+**/images_128_128/
+**/images/
+demo_ui/assets/images/
+*.jpg
+*.jpeg
+*.png
+*.webp
+
+# Node / web 
+node_modules/
+.next/
+out/
+dist/
