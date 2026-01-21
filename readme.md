@@ -1,98 +1,96 @@
-# H&M Personalized Fashion Recommendation System
+# H&M Personalized Fashion Recommendation System 🛍️
 
-An end-to-end personalized fashion recommendation system built using real-world H&M retail data.  
-This project demonstrates how a modern retrieval-based recommender system can be designed, trained, evaluated, and served in a production-oriented setup.
+An end-to-end **personalized fashion recommendation system** built using real-world **H&M retail data**.  
+This project demonstrates how a modern **retrieval-based recommender system** can be designed, trained, evaluated, and served in a **production-oriented setup**.
 
 ---
 
 ## 🎥 Demo (Local)
 
-**Demo GIF – Local Deployment**  
+**Demo GIF – Local Deployment**
 
 ![Demo – Local Deployment](docs/demo.gif)
 
 The demo showcases:
-- Loading a customer profile
+- **Loading a customer profile**
 - Displaying recent purchase history
-- Generating personalized recommendations
-- Handling cold-start users via fallback strategy
+- Generating **personalized recommendations**
+- Handling **cold-start users** via fallback strategy
 
 ---
 
 ## 📌 Project Overview
 
-Large fashion retailers face challenges such as sparse user interaction data, massive product catalogs, and low-latency requirements for real-time recommendations.
+Large fashion retailers face challenges such as **sparse user interaction data**, massive product catalogs, and **low-latency requirements** for real-time recommendations.
 
-This project addresses those challenges by implementing a Two-Tower retrieval-based recommendation system combined with FAISS for efficient nearest-neighbor search. The system is exposed through a FastAPI backend and demonstrated via a lightweight HTML marketplace-like user interface.
+This project addresses those challenges by implementing a **Two-Tower retrieval-based recommendation system** combined with **FAISS** for efficient nearest-neighbor search. The system is exposed through a **FastAPI backend** and demonstrated via a lightweight **HTML marketplace-like user interface**.
 
 ---
 
 ## 🏗️ System Architecture
 
-**High-Level Architecture Diagram**  
+**High-Level Architecture Diagram**
 
 ![System Architecture](docs/high_level_architecture.png)
 
-### Architecture Explanation
+The system is designed as a **modular end-to-end pipeline**:
 
-The system is designed as a modular end-to-end pipeline:
-
-1. Raw Data  
+1. **Raw data**  
    H&M datasets containing customers, articles, and transactions.
 
-2. Data Pipeline (FASE 1–2)  
+2. **Data pipeline (FASE 1–2)**  
    Schema validation, data cleaning, and transformation to generate feature tables.
 
-3. Feature Store  
+3. **Feature store**  
    Processed features stored as Parquet files for reuse during training and inference.
 
-4. Model Training (FASE 3)  
-   A Two-Tower model learns user and item embeddings. Item embeddings are indexed using FAISS for approximate nearest-neighbor retrieval, while offline evaluation is performed using ranking metrics.
+4. **Model training (FASE 3)**  
+   A **Two-Tower model** learns user and item embeddings. Item embeddings are indexed using **FAISS** for approximate nearest-neighbor retrieval, while **offline evaluation** is performed using ranking metrics.
 
-5. Model Registry & Reports  
-   Trained model artifacts, FAISS index, ID mappings, and evaluation reports are stored for reproducibility and analysis.
+5. **Model registry and reports**  
+   Trained model artifacts, FAISS index, ID mappings, and evaluation reports are stored for **reproducibility and analysis**.
 
-6. Serving & Demo (FASE 4)  
-   FastAPI exposes recommendation and health-check endpoints. A cold-start fallback strategy based on popular items is applied, and results are visualized through an HTML marketplace-like demo UI.
+6. **Serving and demo (FASE 4)**  
+   **FastAPI** exposes recommendation and health-check endpoints. A **cold-start fallback strategy** based on popular items is applied, and results are visualized through an **HTML marketplace-like demo UI**.
 
 ---
 
 ## 🧠 Machine Learning Approach
 
-- Model Type: Two-Tower Retrieval Model  
-- Interaction Signal: Implicit feedback (purchase history)  
-- Retrieval Engine: FAISS (Approximate Nearest Neighbor)  
-- Cold-Start Strategy: Popular-item fallback  
-- Evaluation Metrics: Recall@K, NDCG@K
+- **Model type**: Two-Tower retrieval model  
+- Interaction signal: Implicit feedback (purchase history)  
+- **Retrieval engine**: FAISS (Approximate Nearest Neighbor)  
+- Cold-start strategy: Popular-item fallback  
+- **Evaluation metrics**: Recall@K, NDCG@K
 
-This design enables scalable and personalized recommendations with low inference latency.
+This design enables **scalable and personalized recommendations** with **low inference latency**.
 
 ---
 
 ## 🔌 API Endpoints
 
-### GET /health
+**GET /health**  
 Returns service and model health status.
 
-### POST /recommend
-Generates personalized product recommendations.
+**POST /recommend**  
+Generates **personalized product recommendations**.
 
 Request payload:
 - customer_id
 - top_k
 
-The response includes recommended item identifiers, similarity scores, and a cold-start indicator when applicable.
+The response includes **recommended item identifiers**, similarity scores, and a **cold-start indicator** when applicable.
 
 ---
 
 ## 🖥️ Demo UI
 
-The demo UI is implemented using HTML templates and provides:
-- Customer profile overview
+The demo UI is implemented using **HTML templates** and provides:
+- **Customer profile overview**
 - Recent transaction history
-- Personalized recommendation results
+- **Personalized recommendation results**
 
-The interface is intentionally designed to resemble a simple fashion marketplace for intuitive exploration.
+The interface is intentionally designed to resemble a **simple fashion marketplace** for intuitive exploration.
 
 ---
 
@@ -115,15 +113,15 @@ ml_hm_project/
 
 ## ▶️ Running the Project (Local)
 
-The system can be executed locally by running the data pipeline, training the model, and starting the FastAPI service. The demo UI is accessed through the local server.
+The system can be executed locally by running the **data pipeline**, training the **recommendation model**, and starting the **FastAPI service**. The demo UI is accessed through the local server.
 
 ---
 
 ## 🔮 Future Improvements
 
-- Public deployment with appropriate cloud resources
+- **Public deployment** with appropriate cloud resources
 - Two-stage recommendation (retrieval and ranking)
-- Online feedback loop and continuous learning
+- **Online feedback loop** and continuous learning
 - Session-aware or sequential recommendation models
 - Improved monitoring and scalability
 
@@ -131,10 +129,10 @@ The system can be executed locally by running the data pipeline, training the mo
 
 ## 📖 Documentation
 
-Additional documentation is available in the docs directory, covering data understanding, ETL processes, model design, serving strategy, and end-to-end storytelling.
+Additional documentation is available in the **docs directory**, covering data understanding, ETL processes, model design, serving strategy, and **end-to-end storytelling**.
 
 ---
 
 ## 🏁 Final Note
 
-This project is built as a portfolio-grade machine learning system, focusing on end-to-end system design, realistic constraints, and clear engineering decisions.
+This project is built as a **portfolio-grade machine learning system**, focusing on **end-to-end system design**, realistic engineering decisions, and **clear technical trade-offs**.
