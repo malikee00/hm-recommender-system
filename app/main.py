@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-import tempfile
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, FileResponse
@@ -33,10 +32,6 @@ class RecommendReq(BaseModel):
     top_k: int = Field(DEFAULT_TOP_K, ge=1, le=50)
 
 
-class BaselineReq(BaseModel):
-    top_k: int = Field(DEFAULT_TOP_K, ge=1, le=50)
-
-
 @app.on_event("startup")
 def startup() -> None:
     try:
@@ -63,15 +58,19 @@ def home(request: Request):
     return templates.TemplateResponse("index.html", {"request": request, "default_top_k": DEFAULT_TOP_K})
 
 
-@app.get("/download/sample_customers.csv")
+@app.get("/download/sample_customers.xlsx")
 def download_sample_customers():
-    sample_path = Path(__file__).resolve().parents[1] / "data" / "raw" / "hm" / "reference" / "sample_customers.csv" 
+    sample_path = Path(__file__).resolve().parents[1] / "data" / "reference" / "sample_customers.xlsx"
     if not sample_path.exists():
         raise HTTPException(
             status_code=404,
-            detail="sample_customers.csv not found. Jalankan: python scripts/make_sample_customers.py"
+            detail="sample_customers.xlsx not found. Jalankan generator: python scripts/make_sample_customers.py",
         )
-    return FileResponse(str(sample_path), media_type="text/csv", filename="sample_customers.csv")
+    return FileResponse(
+        str(sample_path),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        filename="sample_customers.xlsx",
+    )
 
 
 @app.get("/api/user/{customer_id}")
@@ -80,19 +79,11 @@ def api_user(customer_id: str):
         return svc.user_profile_and_history(customer_id=customer_id, last_n=5)
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
-    
+
 
 @app.post("/api/recommend")
 def api_recommend(req: RecommendReq):
     try:
         return svc.recommend(customer_id=req.customer_id, top_k=req.top_k)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-
-@app.post("/api/baseline")
-def api_baseline(req: BaselineReq):
-    try:
-        return svc.baseline(top_k=req.top_k)
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
