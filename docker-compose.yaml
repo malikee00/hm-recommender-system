@@ -1,0 +1,8 @@
+services:
+  api:
+    image: hm-fastapi:latest
+    container_name: hm-fastapi-test
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env

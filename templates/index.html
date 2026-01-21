@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>H&M Local Marketplace Demo</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+
+<body class="bg-white text-zinc-900">
+  <header class="border-b">
+    <div class="mx-auto max-w-6xl px-4 py-4 flex items-center justify-between">
+      <div class="flex items-center gap-3">
+        <div class="text-2xl font-extrabold tracking-tight text-red-600">H&amp;M</div>
+        <div class="text-sm text-zinc-500">Local Recommender Demo</div>
+      </div>
+      <a href="/download/sample_customers.csv"
+         class="rounded-md bg-red-600 px-3 py-2 text-sm font-semibold text-white hover:bg-red-700">
+        Download sample customer_id.csv
+      </a>
+    </div>
+  </header>
+
+  <main class="mx-auto max-w-6xl px-4 py-6 space-y-6">
+
+    <!-- INPUT -->
+    <section class="rounded-xl border p-4">
+      <div class="flex flex-col gap-3 md:flex-row md:items-end">
+        <div class="flex-1">
+          <label class="text-sm font-semibold">Customer ID</label>
+          <input id="customerId" class="mt-1 w-full rounded-md border px-3 py-2 text-sm"
+                 placeholder="paste customer_id from sample csv..." />
+        </div>
+        <div class="w-40">
+          <label class="text-sm font-semibold">Top K</label>
+          <input id="topK" type="number" min="1" max="50" value="10"
+                 class="mt-1 w-full rounded-md border px-3 py-2 text-sm" />
+        </div>
+        <button id="btnLoad"
+                class="rounded-md bg-zinc-900 px-4 py-2 text-sm font-semibold text-white hover:bg-zinc-800">
+          Load user
+        </button>
+        <button id="btnRecommend"
+                class="rounded-md bg-red-600 px-4 py-2 text-sm font-semibold text-white hover:bg-red-700">
+          Recommend
+        </button>
+      </div>
+      <div id="status" class="mt-3 text-sm text-zinc-600"></div>
+    </section>
+
+    <!-- PROFILE + HISTORY -->
+    <section class="grid grid-cols-1 gap-4 md:grid-cols-3">
+      <div class="rounded-xl border p-4">
+        <div class="text-sm font-bold mb-3">User Profile</div>
+        <div id="profile" class="space-y-4 text-sm text-zinc-800"></div>
+      </div>
+
+      <div class="rounded-xl border p-4 md:col-span-2">
+        <div class="text-sm font-bold mb-3">Last Transactions (5)</div>
+        <div id="history" class="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3"></div>
+      </div>
+    </section>
+
+    <!-- RECOMMENDATION -->
+    <section class="rounded-xl border p-4">
+      <div class="flex items-center gap-3">
+        <button id="tabModel"
+                class="rounded-md bg-red-600 px-3 py-2 text-sm font-semibold text-white">
+          Personalized (Model)
+        </button>
+        <button id="tabBase"
+                class="rounded-md border px-3 py-2 text-sm font-semibold">
+          Popular (Baseline)
+        </button>
+        <div id="fallbackNote" class="ml-auto text-sm text-red-600 font-semibold"></div>
+      </div>
+      <div id="grid" class="mt-4 grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-5"></div>
+    </section>
+
+  </main>
+
+<script>
+  const el = (id) => document.getElementById(id);
+
+  let activeTab = "model";
+
+  el("tabModel").onclick = () => {
+    activeTab = "model";
+    el("tabModel").className = "rounded-md bg-red-600 px-3 py-2 text-sm font-semibold text-white";
+    el("tabBase").className  = "rounded-md border px-3 py-2 text-sm font-semibold";
+  };
+
+  el("tabBase").onclick = () => {
+    activeTab = "base";
+    el("tabBase").className  = "rounded-md bg-red-600 px-3 py-2 text-sm font-semibold text-white";
+    el("tabModel").className = "rounded-md border px-3 py-2 text-sm font-semibold";
+  };
+
+  function setStatus(msg){ el("status").textContent = msg || ""; }
+  function money(v){ return v == null ? "-" : "$" + Number(v).toFixed(2); }
+
+  function renderProfile(p, s){
+    el("profile").innerHTML = `
+      <div>
+        <div class="font-semibold mb-1">Profile</div>
+        <ul class="space-y-1">
+          <li><strong>Age:</strong> ${p.age ?? "-"}</li>
+          <li><strong>Club Member Status:</strong> ${p.club_member_status ?? "-"}</li>
+          <li><strong>Fashion News Frequency:</strong> ${p.fashion_news_frequency ?? "-"}</li>
+        </ul>
+      </div>
+
+      <div>
+        <div class="font-semibold mb-1">Summary</div>
+        <ul class="space-y-1">
+          <li><strong>Total Purchases:</strong> ${s.total_purchases ?? "-"}</li>
+          <li><strong>Last Purchase Date:</strong> ${s.last_purchase_date ?? "-"}</li>
+          <li><strong>Top Product Group:</strong> ${s.top_product_group_name ?? "-"}</li>
+        </ul>
+      </div>
+    `;
+  }
+
+  function historyCard(h){
+    return `
+      <div class="rounded-xl border overflow-hidden">
+        <div class="aspect-square bg-zinc-100">
+          <img src="${h.image_url}" onerror="this.style.display='none';"
+               class="h-full w-full object-cover" />
+        </div>
+        <div class="p-3 space-y-1">
+          <div class="text-xs font-bold">${h.article_id}</div>
+          <div class="text-[11px] text-zinc-600">${h.t_dat ?? ""}</div>
+          <div class="text-[11px] text-zinc-600">${h.product_group_name ?? ""}</div>
+        </div>
+      </div>`;
+  }
+
+  function card(item){
+    const m = item.meta || {};
+    return `
+      <div class="rounded-xl border overflow-hidden">
+        <div class="aspect-square bg-zinc-100">
+          <img src="${item.image_url}" onerror="this.style.display='none';"
+               class="h-full w-full object-cover" />
+        </div>
+        <div class="p-3 space-y-1">
+          <div class="text-xs font-bold">${item.article_id}</div>
+          <div class="text-[11px] text-zinc-600">${m.product_group_name ?? ""}</div>
+          <div class="text-[11px] text-zinc-600">${m.department_name ?? ""}</div>
+          <div class="mt-2 inline-flex rounded-md bg-zinc-900 px-2 py-1 text-[11px] font-semibold text-white">
+            score: ${Number(item.score).toFixed(4)}
+          </div>
+        </div>
+      </div>`;
+  }
+
+  el("btnLoad").onclick = async () => {
+    const cid = el("customerId").value.trim();
+    if(!cid){ setStatus("Please input customer_id"); return; }
+
+    setStatus("Loading user...");
+    try{
+      const r = await fetch(`/api/user/${encodeURIComponent(cid)}`);
+      const data = await r.json();
+      if(!r.ok) throw new Error(data.detail || "error");
+
+      renderProfile(data.profile || {}, data.summary || {});
+      el("history").innerHTML = (data.last_transactions || []).map(historyCard).join("");
+      setStatus("Done.");
+    }catch(e){
+      setStatus("Error: " + e.message);
+    }
+  };
+
+  el("btnRecommend").onclick = async () => {
+    const cid = el("customerId").value.trim();
+    const topK = Number(el("topK").value || 10);
+    if(!cid){ setStatus("Please input customer_id"); return; }
+
+    setStatus(activeTab === "model" ? "Recommending..." : "Loading baseline...");
+    el("fallbackNote").textContent = "";
+
+    try{
+      let r, data;
+      if(activeTab === "model"){
+        r = await fetch("/api/recommend", {
+          method:"POST",
+          headers:{"Content-Type":"application/json"},
+          body: JSON.stringify({customer_id: cid, top_k: topK})
+        });
+        data = await r.json();
+        if(data.is_fallback){
+          el("fallbackNote").textContent = "User not found → showing popular items";
+        }
+      } else {
+        r = await fetch("/api/baseline", {
+          method:"POST",
+          headers:{"Content-Type":"application/json"},
+          body: JSON.stringify({top_k: topK})
+        });
+        data = await r.json();
+      }
+
+      el("grid").innerHTML = (data.recommendations || []).map(card).join("");
+      setStatus("Done.");
+    }catch(e){
+      setStatus("Error: " + e.message);
+    }
+  };
+</script>
+</body>
+</html>

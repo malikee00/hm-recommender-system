@@ -1,104 +1,98 @@
 from __future__ import annotations
 
-from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
+from pathlib import Path
+import tempfile
 
-from app.config import AppConfig
-from app.schemas import (
-    BaselineRequest,
-    BaselineResponse,
-    HealthResponse,
-    MetadataResponse,
-    RecommendRequest,
-    RecommendResponse,
-    RecommendationItem,
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import HTMLResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
+from pydantic import BaseModel, Field
+
+from app.config import (
+    APP_NAME,
+    APP_VERSION,
+    DEFAULT_TOP_K,
+    FEATURE_STORE_DIR,
+    REGISTRY_RUN_DIR,
+    IMAGES_DIR,
 )
-from app.service import AppService
+from app.service import LocalHMService
 
-cfg = AppConfig.from_env()
-app_service = AppService(cfg)
+app = FastAPI(title=APP_NAME, version=APP_VERSION)
 
-app = FastAPI(title=cfg.service_name, version=cfg.service_version)
+templates = Jinja2Templates(directory=str(Path(__file__).resolve().parents[1] / "templates"))
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=cfg.api_cors_origins,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+svc = LocalHMService(feature_store_dir=FEATURE_STORE_DIR, registry_run_dir=REGISTRY_RUN_DIR)
+
+app.mount("/img", StaticFiles(directory=str(IMAGES_DIR)), name="img")
+
+
+class RecommendReq(BaseModel):
+    customer_id: str = Field(..., min_length=5)
+    top_k: int = Field(DEFAULT_TOP_K, ge=1, le=50)
+
+
+class BaselineReq(BaseModel):
+    top_k: int = Field(DEFAULT_TOP_K, ge=1, le=50)
 
 
 @app.on_event("startup")
-def startup_event():
+def startup() -> None:
     try:
-        app_service.load_artifacts()
-    except Exception:
-        # error sudah disimpan ke app_service.last_error
-        return
+        svc.load()
+    except Exception as e:
+        raise RuntimeError(f"Failed to load service artifacts: {e}") from e
 
 
-@app.get("/health", response_model=HealthResponse)
-def health():
-    loaded = app_service.is_loaded
-    detail = None if loaded else (app_service.last_error or "Service not ready")
-
-    return HealthResponse(
-        status="ok",
-        service=cfg.service_name,
-        version=cfg.service_version,
-        model_loaded=loaded,
-        ready=loaded,
-        artifact_version=app_service.artifact_version(),
-        detail=detail,
-    )
+@app.get("/health")
+def health() -> dict:
+    return {
+        "status": "ok",
+        "app_name": APP_NAME,
+        "app_version": APP_VERSION,
+        "default_top_k": DEFAULT_TOP_K,
+        "feature_store_dir": str(FEATURE_STORE_DIR),
+        "registry_run_dir": str(REGISTRY_RUN_DIR),
+        "images_dir": str(IMAGES_DIR),
+    }
 
 
-@app.get("/metadata", response_model=MetadataResponse)
-def metadata():
-    if not app_service.is_loaded:
-        raise HTTPException(status_code=503, detail="Service not ready")
-    return MetadataResponse(metadata=app_service.get_metadata())
+@app.get("/", response_class=HTMLResponse)
+def home(request: Request):
+    return templates.TemplateResponse("index.html", {"request": request, "default_top_k": DEFAULT_TOP_K})
 
 
-@app.post("/recommend", response_model=RecommendResponse)
-def recommend(req: RecommendRequest):
-    if not app_service.is_loaded:
-        raise HTTPException(status_code=503, detail="Service not ready")
-
-    result = app_service.recommend(req.customer_id, req.top_k)
-
-    return RecommendResponse(
-        customer_id=result.customer_id,
-        top_k=result.top_k,
-        is_fallback=result.is_fallback,
-        recommendations=[
-            RecommendationItem(
-                article_id=r.article_id,
-                score=r.score,
-                image_url=app_service.build_image_url(r.article_id),
-            )
-            for r in result.recommendations
-        ],
-    )
+@app.get("/download/sample_customers.csv")
+def download_sample_customers():
+    sample_path = Path(__file__).resolve().parents[1] / "data" / "raw" / "hm" / "reference" / "sample_customers.csv" 
+    if not sample_path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail="sample_customers.csv not found. Jalankan: python scripts/make_sample_customers.py"
+        )
+    return FileResponse(str(sample_path), media_type="text/csv", filename="sample_customers.csv")
 
 
-@app.post("/baseline", response_model=BaselineResponse)
-def baseline(req: BaselineRequest):
-    if not app_service.is_loaded:
-        raise HTTPException(status_code=503, detail="Service not ready")
+@app.get("/api/user/{customer_id}")
+def api_user(customer_id: str):
+    try:
+        return svc.user_profile_and_history(customer_id=customer_id, last_n=5)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    
 
-    result = app_service.baseline(req.top_k)
+@app.post("/api/recommend")
+def api_recommend(req: RecommendReq):
+    try:
+        return svc.recommend(customer_id=req.customer_id, top_k=req.top_k)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
-    return BaselineResponse(
-        top_k=req.top_k,
-        is_fallback=True,
-        recommendations=[
-            RecommendationItem(
-                article_id=r.article_id,
-                score=r.score,
-                image_url=app_service.build_image_url(r.article_id),
-            )
-            for r in result.recommendations
-        ],
-    )
+
+@app.post("/api/baseline")
+def api_baseline(req: BaselineReq):
+    try:
+        return svc.baseline(top_k=req.top_k)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))

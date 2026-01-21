@@ -1,249 +1,353 @@
 from __future__ import annotations
 
-import hashlib
-import json
-import time
-import zipfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
+import inspect
+import math
+import re
 
 import pandas as pd
-import requests
 
-from app.config import AppConfig
-from ml.recommender.inference import RecommenderService, RecommendResult, Recommendation
+from ml.recommender.inference import RecommenderService
 
 
 @dataclass
-class LoadedArtifacts:
-    service: RecommenderService
-    metadata: Dict[str, Any]
-    popularity_df: pd.DataFrame
+class RecItem:
+    article_id: str
+    score: float
+    image_url: str
+    meta: Dict[str, Any]
 
 
-class AppService:
-    def __init__(self, cfg: AppConfig):
-        self.cfg = cfg
-        self._loaded: Optional[LoadedArtifacts] = None
-        self._last_error: Optional[str] = None
+class LocalHMService:
+    def __init__(self, feature_store_dir: Path, registry_run_dir: Path):
+        self.feature_store_dir = Path(feature_store_dir)
+        self.registry_run_dir = Path(registry_run_dir)
 
-    @property
-    def is_loaded(self) -> bool:
-        return self._loaded is not None
+        self._customers: Optional[pd.DataFrame] = None
+        self._items: Optional[pd.DataFrame] = None
+        self._interactions: Optional[pd.DataFrame] = None
+        self._user_hist_agg: Optional[pd.DataFrame] = None
 
-    @property
-    def last_error(self) -> Optional[str]:
-        return self._last_error
+        self.reco = self._build_recommender()
 
-    def artifact_version(self) -> Optional[str]:
-        if self._loaded is None:
-            return None
-        meta = self._loaded.metadata
-        return meta.get("run_id") or meta.get("model_type") or meta.get("objective")
+    def _build_recommender(self) -> RecommenderService:
+        init_sig = inspect.signature(RecommenderService.__init__)
+        params = set(init_sig.parameters.keys())
 
-    def build_image_url(self, article_id: str) -> str:
-        if not self.cfg.image_base_url:
-            return "https://via.placeholder.com/128?text=No+Image"
-
-        article_id = str(article_id)
-        prefix = article_id[:3]
-        return f"{self.cfg.image_base_url}/{prefix}/{article_id}.jpg"
-
-    def ensure_artifacts_present(self) -> None:
-        required_files = [
-            self.cfg.two_tower_model_path,
-            self.cfg.faiss_index_path,
-            self.cfg.encoders_path,
-            self.cfg.item_popularity_path,
-            self.cfg.metadata_path,
-        ]
-        if all(p.exists() for p in required_files):
-            return
-
-        if not self.cfg.artifacts_url:
-            missing = [str(p) for p in required_files if not p.exists()]
-            raise FileNotFoundError(
-                "Artifacts missing and ARTIFACTS_URL not set:\n- " + "\n- ".join(missing)
+        if "registry_run_dir" in params and "feature_store_dir" in params:
+            return RecommenderService(
+                registry_run_dir=str(self.registry_run_dir),
+                feature_store_dir=str(self.feature_store_dir),
             )
 
-        self.cfg.registry_run_dir.mkdir(parents=True, exist_ok=True)
-
-        zip_cache_dir = self.cfg.registry_base_dir / "_downloads"
-        zip_cache_dir.mkdir(parents=True, exist_ok=True)
-
-        url_hash = hashlib.sha1(self.cfg.artifacts_url.encode("utf-8")).hexdigest()[:12]
-        zip_path = zip_cache_dir / f"{self.cfg.run_id}_{url_hash}.zip"
-
-        if not zip_path.exists() or zip_path.stat().st_size == 0:
-            self._download_zip_with_retry(self.cfg.artifacts_url, zip_path)
-
-        self._extract_zip_into_registry(zip_path, self.cfg.registry_run_dir)
-
-        missing_after = [str(p) for p in required_files if not p.exists()]
-        if missing_after:
-            raise FileNotFoundError(
-                "Artifacts download/extract completed but required files still missing:\n- "
-                + "\n- ".join(missing_after)
+        if "run_dir" in params and "feature_store_dir" in params:
+            return RecommenderService(
+                run_dir=str(self.registry_run_dir),
+                feature_store_dir=str(self.feature_store_dir),
             )
 
-    def _download_zip_with_retry(self, url: str, zip_path: Path) -> None:
-        tmp_path = zip_path.with_suffix(zip_path.suffix + ".part")
+        if "registry_dir" in params and "feature_store_dir" in params:
+            return RecommenderService(
+                registry_dir=str(self.registry_run_dir),
+                feature_store_dir=str(self.feature_store_dir),
+            )
 
-        max_attempts = 8
-        backoff_cap = 30
+        if "registry_run_dir" in params and "feature_store" in params:
+            return RecommenderService(
+                registry_run_dir=str(self.registry_run_dir),
+                feature_store=str(self.feature_store_dir),
+            )
 
-        for attempt in range(1, max_attempts + 1):
-            try:
-                headers = {"User-Agent": "hm-recommender/1.0"}
-                resume_from = tmp_path.stat().st_size if tmp_path.exists() else 0
-                if resume_from > 0:
-                    headers["Range"] = f"bytes={resume_from}-"
-
-                with requests.get(
-                    url,
-                    stream=True,
-                    timeout=(15, 300),
-                    headers=headers,
-                    allow_redirects=True,
-                ) as r:
-                    if r.status_code == 416:
-                        if tmp_path.exists() and tmp_path.stat().st_size > 0:
-                            tmp_path.replace(zip_path)
-                            return
-                        raise RuntimeError("HTTP 416 (Range Not Satisfiable) but no partial file exists.")
-
-                    r.raise_for_status()
-
-                    mode = "ab" if resume_from > 0 else "wb"
-                    with open(tmp_path, mode) as f:
-                        for chunk in r.iter_content(chunk_size=1024 * 1024):
-                            if chunk:
-                                f.write(chunk)
-
-                if tmp_path.exists() and tmp_path.stat().st_size > 0:
-                    tmp_path.replace(zip_path)
-                    return
-
-                raise RuntimeError("Download completed but zip file is empty.")
-
-            except Exception as e:
-                if attempt == max_attempts:
-                    raise RuntimeError(f"Failed to download artifacts zip from {url}: {e}")
-
-                time.sleep(min(2 ** attempt, backoff_cap))
-
-    def _extract_zip_into_registry(self, zip_path: Path, target_dir: Path) -> None:
-        with zipfile.ZipFile(zip_path, "r") as zf:
-            names = [n for n in zf.namelist() if not n.endswith("/")]
-
-            normalized = [n.replace("\\", "/") for n in names]
-            run_prefix = None
-
-            candidates = [
-                "two_tower_model.pt",
-                "faiss.index",
-                "feature_encoders.json",
-                "item_popularity.csv",
-                "metadata.json",
-            ]
-
-            for n in normalized:
-                for c in candidates:
-                    if n.endswith("/" + c):
-                        run_prefix = n[: -len(c)]
-                        break
-                if run_prefix is not None:
+        if len(params) <= 1:
+            svc = RecommenderService()
+            for attr_name in ["registry_run_dir", "run_dir", "registry_dir", "artifacts_dir"]:
+                if hasattr(svc, attr_name):
+                    setattr(svc, attr_name, str(self.registry_run_dir))
                     break
-
-            if run_prefix is None:
-                run_prefix = ""
-
-            for member in names:
-                m = member.replace("\\", "/")
-                if m.endswith("/"):
-                    continue
-
-                if run_prefix and m.startswith(run_prefix):
-                    rel = m[len(run_prefix) :]
-                else:
-                    rel = m
-
-                rel = rel.lstrip("/")
-                out_path = target_dir / rel
-                out_path.parent.mkdir(parents=True, exist_ok=True)
-
-                with zf.open(member) as src, open(out_path, "wb") as dst:
-                    dst.write(src.read())
-
-    def load_artifacts(self) -> None:
-        if self._loaded is not None:
-            return
-
-        try:
-            self.ensure_artifacts_present()
-
-            svc = RecommenderService(
-                registry_dir=str(self.cfg.registry_run_dir),
-                feature_store_dir=str(self.cfg.feature_store_dir),
-            )
-            svc.load()
-
-            with open(self.cfg.metadata_path, "r", encoding="utf-8") as f:
-                meta = json.load(f)
-
-            pop = pd.read_csv(self.cfg.item_popularity_path)
-            if "article_id" not in pop.columns:
-                raise ValueError(
-                    f"item_popularity.csv must have 'article_id' column, got: {list(pop.columns)}"
-                )
-
-            score_col = None
-            for c in ["popularity", "cnt", "count", "score"]:
-                if c in pop.columns:
-                    score_col = c
+            for attr_name in ["feature_store_dir", "feature_store", "feature_store_path"]:
+                if hasattr(svc, attr_name):
+                    setattr(svc, attr_name, str(self.feature_store_dir))
                     break
+            return svc
 
-            if score_col is None:
-                pop = pop.copy()
-                pop["popularity"] = list(range(len(pop), 0, -1))
-                score_col = "popularity"
-
-            pop = pop[["article_id", score_col]].rename(columns={score_col: "score"})
-            pop["article_id"] = pop["article_id"].astype(str)
-            pop["score"] = pop["score"].astype(float)
-
-            self._loaded = LoadedArtifacts(service=svc, metadata=meta, popularity_df=pop)
-            self._last_error = None
-
-        except Exception as e:
-            self._loaded = None
-            self._last_error = str(e)
-            raise
-
-    def recommend(self, customer_id: str, top_k: int) -> RecommendResult:
-        if self._loaded is None:
-            raise RuntimeError("Service not loaded")
-        return self._loaded.service.recommend(customer_id, top_k)
-
-    def baseline(self, top_k: int) -> RecommendResult:
-        if self._loaded is None:
-            raise RuntimeError("Service not loaded")
-
-        df = self._loaded.popularity_df.head(top_k)
-        recs: List[Recommendation] = [
-            Recommendation(article_id=row["article_id"], score=float(row["score"]))
-            for _, row in df.iterrows()
-        ]
-
-        return RecommendResult(
-            customer_id="baseline",
-            top_k=top_k,
-            is_fallback=True,
-            recommendations=recs,
+        raise TypeError(
+            "RecommenderService.__init__ signature tidak cocok dengan wrapper. "
+            f"Param __init__ yang terbaca: {list(params)}"
         )
 
-    def get_metadata(self) -> Dict[str, Any]:
-        if self._loaded is None:
-            raise RuntimeError("Service not loaded")
-        return dict(self._loaded.metadata)
+    def load(self) -> None:
+        self.reco.load()
+
+        self._customers = self._safe_read_parquet(self.feature_store_dir / "user_features.parquet")
+        self._items = self._safe_read_parquet(self.feature_store_dir / "item_features.parquet")
+        self._interactions = self._safe_read_parquet(self.feature_store_dir / "interactions.parquet")
+        uh = self.feature_store_dir / "user_history_agg.parquet"
+        self._user_hist_agg = self._safe_read_parquet(uh) if uh.exists() else None
+
+        self._prepare_indexes()
+
+    def _safe_read_parquet(self, path: Path) -> pd.DataFrame:
+        if not path.exists():
+            raise FileNotFoundError(f"Missing required parquet: {path}")
+        return pd.read_parquet(path)
+
+    def _normalize_article_id(self, x: Any) -> str:
+        if x is None:
+            return ""
+        s = str(x).strip()
+
+        if re.fullmatch(r"\d+\.0", s):
+            s = s.split(".")[0]
+
+        if re.fullmatch(r"\d+", s):
+            return s.zfill(10)
+
+        digits = re.sub(r"\D", "", s)
+        if digits:
+            return digits.zfill(10)
+
+        return s
+
+    def _prepare_indexes(self) -> None:
+        if self._items is not None:
+            self._items = self._items.copy()
+            if "article_id" in self._items.columns:
+                self._items["article_id"] = self._items["article_id"].apply(self._normalize_article_id)
+                self._items = self._items.drop_duplicates("article_id")
+                self._items = self._items.set_index("article_id", drop=False)
+
+        if self._customers is not None:
+            self._customers = self._customers.copy()
+            if "customer_id" in self._customers.columns:
+                self._customers["customer_id"] = self._customers["customer_id"].astype(str)
+                self._customers = self._customers.drop_duplicates("customer_id")
+                self._customers = self._customers.set_index("customer_id", drop=False)
+
+        if self._interactions is not None:
+            self._interactions = self._interactions.copy()
+            if "customer_id" in self._interactions.columns:
+                self._interactions["customer_id"] = self._interactions["customer_id"].astype(str)
+            if "article_id" in self._interactions.columns:
+                self._interactions["article_id"] = self._interactions["article_id"].apply(self._normalize_article_id)
+            if "t_dat" in self._interactions.columns:
+                self._interactions["t_dat"] = pd.to_datetime(self._interactions["t_dat"], errors="coerce")
+
+    def _to_json_safe(self, obj: Any) -> Any:
+        if obj is None:
+            return None
+
+        if isinstance(obj, float):
+            return obj if math.isfinite(obj) else None
+
+        if isinstance(obj, (pd.Timestamp,)):
+            return obj.isoformat()
+
+        if isinstance(obj, dict):
+            return {str(k): self._to_json_safe(v) for k, v in obj.items()}
+
+        if isinstance(obj, (list, tuple)):
+            return [self._to_json_safe(v) for v in obj]
+
+        if hasattr(obj, "item") and callable(getattr(obj, "item")):
+            try:
+                return self._to_json_safe(obj.item())
+            except Exception:
+                pass
+
+        try:
+            if pd.isna(obj):
+                return None
+        except Exception:
+            pass
+
+        return obj
+
+    def image_url(self, article_id: str) -> str:
+        aid = self._normalize_article_id(article_id)
+        prefix = aid[:3] if len(aid) >= 3 else "000"
+        return f"/img/{prefix}/{aid}.jpg"
+
+    def _item_meta(self, article_id: str) -> Dict[str, Any]:
+        if self._items is None:
+            return {}
+        aid = self._normalize_article_id(article_id)
+        if aid in self._items.index:
+            row = self._items.loc[aid].to_dict()
+            keep = [
+                "product_type_name",
+                "product_group_name",
+                "department_name",
+                "colour_group_name",
+                "section_name",
+                "garment_group_name",
+            ]
+            return {k: self._to_json_safe(row.get(k)) for k in keep if k in row}
+        return {}
+
+    def sample_customers(self, n: int = 200, history_n: int = 5) -> pd.DataFrame:
+        if self._interactions is None:
+            if hasattr(self.reco, "enc") and hasattr(self.reco.enc, "user_id_map"):
+                cids = list(self.reco.enc.user_id_map.keys())[:n]
+                return pd.DataFrame({"customer_id": cids, "history": [""] * len(cids)})
+            return pd.DataFrame({"customer_id": [], "history": []})
+
+        df = self._interactions.copy()
+        cols = ["customer_id", "article_id"]
+        if "t_dat" in df.columns:
+            cols.append("t_dat")
+        df = df[cols].copy()
+
+        if "t_dat" in df.columns:
+            df = df.sort_values(["customer_id", "t_dat"], ascending=[True, False])
+        else:
+            df = df.sort_values(["customer_id"], ascending=[True])
+
+        df["rank"] = df.groupby("customer_id").cumcount() + 1
+        df = df[df["rank"] <= history_n]
+
+        hist = (
+            df.groupby("customer_id")["article_id"]
+            .apply(lambda s: "|".join([str(x) for x in s.tolist()]))
+            .reset_index()
+            .rename(columns={"article_id": "history"})
+        )
+
+        if self._user_hist_agg is not None and "customer_id" in self._user_hist_agg.columns and "total_purchases" in self._user_hist_agg.columns:
+            base = self._user_hist_agg[["customer_id", "total_purchases"]].copy()
+            base["customer_id"] = base["customer_id"].astype(str)
+            hist["customer_id"] = hist["customer_id"].astype(str)
+            out = base.merge(hist, on="customer_id", how="left").sort_values("total_purchases", ascending=False)
+            out["history"] = out["history"].fillna("")
+            return out[["customer_id", "history"]].head(n).reset_index(drop=True)
+
+        return hist.head(n).reset_index(drop=True)
+
+    def user_profile_and_history(self, customer_id: str, last_n: int = 5) -> Dict[str, Any]:
+        customer_id = str(customer_id)
+
+        profile: Dict[str, Any] = {"customer_id": customer_id}
+        if self._customers is not None and customer_id in self._customers.index:
+            row = self._customers.loc[customer_id].to_dict()
+            keep = ["customer_id", "age", "club_member_status", "fashion_news_frequency", "active"]
+            for k in keep:
+                if k in row:
+                    profile[k] = self._to_json_safe(row.get(k))
+
+        history_items: List[Dict[str, Any]] = []
+        if self._interactions is not None:
+            df = self._interactions[self._interactions["customer_id"] == customer_id]
+            if "t_dat" in df.columns:
+                df = df.sort_values("t_dat", ascending=False)
+            df = df.head(last_n)
+
+            for _, r in df.iterrows():
+                aid = self._normalize_article_id(r.get("article_id"))
+                price_val = r.get("price")
+                if price_val is not None and pd.isna(price_val):
+                    price_val = None
+
+                item = {
+                    "t_dat": None if pd.isna(r.get("t_dat")) else str(r.get("t_dat").date()),
+                    "article_id": aid,
+                    "price": self._to_json_safe(float(price_val)) if price_val is not None else None,
+                }
+                item.update(self._item_meta(aid))
+                item["image_url"] = self.image_url(aid)
+                history_items.append(self._to_json_safe(item))
+
+        summary: Dict[str, Any] = {}
+        if self._user_hist_agg is not None and "customer_id" in self._user_hist_agg.columns:
+            h = self._user_hist_agg.copy()
+            h["customer_id"] = h["customer_id"].astype(str)
+            match = h[h["customer_id"] == customer_id]
+            if len(match) > 0:
+                row = match.iloc[0].to_dict()
+                keep = ["total_purchases", "last_purchase_date", "avg_price", "top_product_group_name"]
+                summary = {k: self._to_json_safe(row.get(k)) for k in keep if k in row}
+
+        return self._to_json_safe({"profile": profile, "summary": summary, "last_transactions": history_items})
+
+    def _normalize_recommend_output(self, out: Any) -> Tuple[List[Any], bool]:
+        if isinstance(out, tuple) and len(out) == 2:
+            recs, is_fallback = out
+            return list(recs), bool(is_fallback)
+
+        is_fallback = bool(getattr(out, "is_fallback", getattr(out, "fallback", False)))
+
+        for key in ["recommendations", "recs", "items", "results"]:
+            if hasattr(out, key):
+                recs = getattr(out, key)
+                return list(recs), is_fallback
+
+        if hasattr(out, "__iter__"):
+            try:
+                return list(out), is_fallback
+            except Exception:
+                pass
+
+        raise TypeError("Output recommend() tidak bisa dinormalisasi jadi list rekomendasi")
+
+    def recommend(self, customer_id: str, top_k: int = 10) -> Dict[str, Any]:
+        customer_id = str(customer_id)
+
+        if not hasattr(self.reco, "recommend"):
+            raise RuntimeError("RecommenderService tidak punya method recommend(customer_id, top_k)")
+
+        out = self.reco.recommend(customer_id=customer_id, top_k=top_k)
+        recs, is_fallback = self._normalize_recommend_output(out)
+
+        items: List[RecItem] = []
+        for x in recs:
+            if isinstance(x, dict):
+                raw_aid = x.get("article_id") or x.get("item_id") or x.get("article") or ""
+                aid = self._normalize_article_id(raw_aid)
+                score = float(x.get("score", 0.0))
+            else:
+                raw_aid = getattr(x, "article_id", getattr(x, "item_id", getattr(x, "article", "")))
+                aid = self._normalize_article_id(raw_aid)
+                score = float(getattr(x, "score", 0.0))
+
+            if not aid:
+                continue
+
+            if not math.isfinite(score):
+                score = 0.0
+
+            items.append(
+                RecItem(
+                    article_id=aid,
+                    score=score,
+                    image_url=self.image_url(aid),
+                    meta=self._item_meta(aid),
+                )
+            )
+
+        payload = {
+            "customer_id": customer_id,
+            "top_k": top_k,
+            "is_fallback": bool(is_fallback),
+            "recommendations": [i.__dict__ for i in items],
+        }
+        return self._to_json_safe(payload)
+
+    def baseline(self, top_k: int = 10) -> Dict[str, Any]:
+        recs: List[str]
+        if hasattr(self.reco, "popularity"):
+            recs = [self._normalize_article_id(x) for x in list(self.reco.popularity)[:top_k]]
+        else:
+            recs = []
+
+        items: List[RecItem] = []
+        for aid in recs:
+            items.append(
+                RecItem(
+                    article_id=aid,
+                    score=0.0,
+                    image_url=self.image_url(aid),
+                    meta=self._item_meta(aid),
+                )
+            )
+
+        return self._to_json_safe({"top_k": top_k, "recommendations": [i.__dict__ for i in items]})
