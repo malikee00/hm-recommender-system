@@ -8,9 +8,8 @@ This project demonstrates how a modern retrieval-based recommender system can be
 ## 🎥 Demo (Local)
 
 **Demo GIF – Local Deployment**  
-(placeholder: replace with your demo GIF)
 
-[ INSERT DEMO GIF HERE ]
+![Demo – Local Deployment](docs/demo.gif)
 
 The demo showcases:
 - Loading a customer profile
@@ -31,9 +30,8 @@ This project addresses those challenges by implementing a Two-Tower retrieval-ba
 ## 🏗️ System Architecture
 
 **High-Level Architecture Diagram**  
-(placeholder: replace with your finalized architecture diagram)
 
-[ INSERT ARCHITECTURE DIAGRAM HERE ]
+![System Architecture](docs/high_level_architecture.png)
 
 ### Architecture Explanation
 
@@ -99,7 +97,7 @@ The interface is intentionally designed to resemble a simple fashion marketplace
 ---
 
 ## 📁 Project Structure
-
+```
 ml_hm_project/
 ├─ README.md
 ├─ data/                     Feature store (Parquet)
@@ -112,7 +110,7 @@ ml_hm_project/
 ├─ demo_ui/                  HTML demo UI
 ├─ ops/                      Pipeline and runner scripts
 └─ docs/                     Detailed documentation and diagrams
-
+```
 ---
 
 ## ▶️ Running the Project (Local)
