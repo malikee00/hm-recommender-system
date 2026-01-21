@@ -29,7 +29,7 @@ Rather than maximizing model complexity, the focus is on **end-to-end system cla
 
 ## 🏗️ System Architecture
 
-![Detailed System Architecture](docs/detailed_architecture.png)
+![Detailed System Architecture](./detailed_architecture.png)
 
 The system follows a **modular, phase-based architecture** that mirrors a realistic machine learning production pipeline.
 
